@@ -130,6 +130,8 @@ def at_run_validation():
     skip_sync  = data.get("skip_sync", True)
     sync_limit = data.get("sync_limit", 0)
     sync_tables = data.get("sync_tables", [])   # list of table names for full sync pass
+    year_from  = data.get("year_from")          # int or None → config default window
+    year_to    = data.get("year_to")
 
     with _process_lock:
         if _process is not None and _process.poll() is None:
@@ -144,6 +146,10 @@ def at_run_validation():
             cmd.append("--skip-sync")
         if sync_limit:
             cmd += ["--sync-limit", str(sync_limit)]
+        if year_from:
+            cmd += ["--year-from", str(int(year_from))]
+        if year_to:
+            cmd += ["--year-to", str(int(year_to))]
         _process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -413,6 +419,38 @@ def random_compare():
         src_raw_cols = src_conn.query(f"SHOW COLUMNS FROM `{table}`")
         src_col_names = [r[0] for r in src_raw_cols]
 
+        # Data window: same rule as validate_all_tables.py. Request year_from/
+        # year_to (inclusive years) override the config default of the last
+        # data_window_years calendar years. Uses first date-typed PK column.
+        win_years = int((cfg.get("tuning") or {}).get("data_window_years", 0))
+        year_from = data.get("year_from")
+        year_to = data.get("year_to")
+        import datetime as _dt
+        if year_from:
+            win_start = f"{int(year_from)}-01-01"
+        elif win_years > 0:
+            win_start = f"{_dt.date.today().year - win_years}-01-01"
+        else:
+            win_start = None
+        win_end = f"{int(year_to) + 1}-01-01" if year_to else None  # exclusive
+
+        win_cond = ""
+        cutoff = None
+        if win_start or win_end:
+            src_col_types = {r[0]: str(r[1]).lower() for r in src_raw_cols}
+            for c in pk_cols:
+                t = src_col_types.get(c, "")
+                if "timestamp" in t or "datetime" in t or t.startswith("date"):
+                    parts = []
+                    if win_start:
+                        parts.append(f"`{c}` >= '{win_start}'")
+                    if win_end:
+                        parts.append(f"`{c}` < '{win_end}'")
+                    win_cond = " AND ".join(parts)
+                    cutoff = (f"{win_start or ''}..{year_to or ''}".strip(".")
+                              if win_end else win_start)
+                    break
+
         # Use intersection of columns (in target order)
         common_cols = [c for c in all_cols if c in set(src_col_names)]
         if not common_cols:
@@ -437,9 +475,12 @@ def random_compare():
                 use_range = True
                 range_pk = pk_cols[0]
 
+        _win_where = f" WHERE {win_cond}" if win_cond else ""
+        _win_and   = f" AND {win_cond}" if win_cond else ""
+
         if use_range:
             if sample_offset == 0:
-                _mm = src_conn.query(f"SELECT MIN(`{range_pk}`), MAX(`{range_pk}`) FROM `{table}`")
+                _mm = src_conn.query(f"SELECT MIN(`{range_pk}`), MAX(`{range_pk}`) FROM `{table}`{_win_where}")
                 _min = int(_mm[0][0]) if _mm and _mm[0][0] is not None else 0
                 _max = int(_mm[0][1]) if _mm and _mm[0][1] is not None else 0
                 _span = max(0, _max - _min - sample_size)
@@ -448,18 +489,18 @@ def random_compare():
                 start_pk = sample_offset   # continuation: last batch max_pk + 1
             src_sql = (
                 f"SELECT {col_list} FROM `{table}` "
-                f"WHERE `{range_pk}` >= {start_pk} "
+                f"WHERE `{range_pk}` >= {start_pk}{_win_and} "
                 f"ORDER BY `{range_pk}` LIMIT {sample_size}"
             )
         else:
             if sample_offset == 0:
-                _cnt = src_conn.query(f"SELECT COUNT(*) FROM `{table}`")
+                _cnt = src_conn.query(f"SELECT COUNT(*) FROM `{table}`{_win_where}")
                 _total = int(_cnt[0][0]) if _cnt else 0
                 _max_off = max(0, _total - sample_size)
                 start_pk = int((seed % 999983) / 999983.0 * _max_off) if _max_off > 0 else 0
             else:
                 start_pk = sample_offset
-            src_sql = f"SELECT {col_list} FROM `{table}` LIMIT {sample_size} OFFSET {start_pk}"
+            src_sql = f"SELECT {col_list} FROM `{table}`{_win_where} LIMIT {sample_size} OFFSET {start_pk}"
 
         src_rows_raw = src_conn.query(src_sql)
 
@@ -577,12 +618,12 @@ def random_compare():
             if use_range:
                 tgt_sample_sql = (
                     f"SELECT {col_list} FROM `{table}` "
-                    f"WHERE `{range_pk}` >= {start_pk} "
+                    f"WHERE `{range_pk}` >= {start_pk}{_win_and} "
                     f"ORDER BY `{range_pk}` LIMIT {sample_size}"
                 )
             else:
                 tgt_sample_sql = (
-                    f"SELECT {col_list} FROM `{table}` "
+                    f"SELECT {col_list} FROM `{table}`{_win_where} "
                     f"LIMIT {sample_size} OFFSET {start_pk}"
                 )
             tc = tgt_conn.cursor()
@@ -668,6 +709,7 @@ def random_compare():
             "pk_cols": pk_cols,
             "columns": common_cols,
             "rows": result_rows,
+            "window": cutoff if win_cond else None,
         })
 
     except Exception as e:
@@ -691,11 +733,30 @@ def table_timestamp_info():
     table = data.get("table")
     db = data.get("db", "prs")
     pk_cols_hint = data.get("pk_cols", [])   # pre-known PK cols from validation run
+    year_from = data.get("year_from")
+    year_to = data.get("year_to")
 
     if not table:
         return jsonify({"error": "Missing 'table' parameter"}), 400
 
     cfg = _load_config()
+
+    # Year window: explicit request range, else config default (last N years)
+    win_years = int((cfg.get("tuning") or {}).get("data_window_years", 0))
+    import datetime as _dt
+    if year_from:
+        win_start = f"{int(year_from)}-01-01"
+    elif win_years > 0:
+        win_start = f"{_dt.date.today().year - win_years}-01-01"
+    else:
+        win_start = None
+    win_end = f"{int(year_to) + 1}-01-01" if year_to else None  # exclusive
+
+    def _win_where(col):
+        parts = []
+        if win_start: parts.append(f"`{col}` >= '{win_start}'")
+        if win_end:   parts.append(f"`{col}` < '{win_end}'")
+        return f" WHERE {' AND '.join(parts)}" if parts else ""
     src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
     tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
 
@@ -761,17 +822,22 @@ def table_timestamp_info():
 
         result = {"has_ts_pk": ts_col is not None, "ts_col": ts_col}
 
+        # window label only when a date-typed PK column exists to filter on —
+        # the COUNT(*) fallback path has no such column and counts the full table
+        result["window"] = (f"{win_start or ''}..{f'{int(year_to)}-12-31' if year_to else ''}"
+                            .strip(".") if (ts_col and (win_start or win_end)) else None)
+
         if ts_col:
-            # Query MIN/MAX from source
+            # Query MIN/MAX from source (within year window on the ts column)
             src_rows = src_conn.query(
-                f"SELECT MIN(`{ts_col}`), MAX(`{ts_col}`) FROM `{table}`"
+                f"SELECT MIN(`{ts_col}`), MAX(`{ts_col}`) FROM `{table}`{_win_where(ts_col)}"
             )
             src_min = str(src_rows[0][0]) if src_rows and src_rows[0][0] is not None else None
             src_max = str(src_rows[0][1]) if src_rows and src_rows[0][1] is not None else None
 
             # Query MIN/MAX from target
             tc = tgt_conn.cursor()
-            tc.execute(f"SELECT MIN(`{ts_col}`), MAX(`{ts_col}`) FROM `{table}`")
+            tc.execute(f"SELECT MIN(`{ts_col}`), MAX(`{ts_col}`) FROM `{table}`{_win_where(ts_col)}")
             tgt_row = tc.fetchone()
             tc.close()
             tgt_min = str(tgt_row[0]) if tgt_row and tgt_row[0] is not None else None
@@ -1233,6 +1299,10 @@ def download_excel(table):
     ws.set_column(0, 0, 28); ws.set_column(1, 1, 18)
     ws.set_row(0, 32); ws.set_row(1, 8); ws.set_row(2, 22)
     ws.merge_range(0, 0, 0, 1, f"Migration Audit Report — {table}", TITLE)
+    if meta.get("window"):
+        ws.set_row(1, 18)
+        ws.merge_range(1, 0, 1, 1, f"Data window: {meta['window']}",
+                       fmt(font_color="#6B7280", italic=True, valign="vcenter"))
     ws.write_row(2, 0, ["Category", "Count"], HDR)
 
     for ri, (label, val, bg, vbg) in enumerate([

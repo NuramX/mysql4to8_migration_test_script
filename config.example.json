@@ -13,6 +13,7 @@
   },
   "default_db": "technical",
   "tuning": {
+    "data_window_years": 2,
     "workers": 8,
     "src_timeout": 300,
     "max_errors": 2000,

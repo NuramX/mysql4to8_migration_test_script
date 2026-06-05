@@ -849,6 +849,12 @@ code, .mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
         <input type="checkbox" id="at-auto-sample" style="cursor:pointer">
         Auto Random Sample
       </label>
+      <span style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px" title="ตรวจเฉพาะข้อมูลช่วงปีนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">
+        Data Year:
+        <select id="at-year-from" class="db-select"></select>
+        –
+        <select id="at-year-to" class="db-select"></select>
+      </span>
       <button id="at-run-btn" onclick="runAllTables()">
         <div class="spinner"></div>
         <span class="btn-icon">▶</span>
@@ -1041,6 +1047,18 @@ const atTsInfoCache = {};       // table -> ts-info result (persists across SSE 
 
 // Per-DB result store — saves/restores atResults+atCounts when switching databases
 const atDbStore = {};  // db -> { results: {...}, counts: {...} }
+
+// Year-range window for data checks. Empty inputs → null → backend falls back
+// to config default (last data_window_years calendar years).
+function atYearWindow() {
+  let yf = parseInt(document.getElementById('at-year-from')?.value, 10);
+  let yt = parseInt(document.getElementById('at-year-to')?.value, 10);
+  if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) [yf, yt] = [yt, yf];  // swap reversed range
+  return {
+    year_from: Number.isFinite(yf) ? yf : null,
+    year_to:   Number.isFinite(yt) ? yt : null,
+  };
+}
 
 function atSaveDbState() {
   if (!activeDatabase) return;
@@ -1260,6 +1278,7 @@ function atRenderTsInfo(r) {
     return `
       <div style="margin-bottom:6px; font-size:12px; color:var(--muted)">
         PK Timestamp column: <strong style="color:var(--purple); font-family:monospace">${r.ts_col}</strong>
+        ${r.window ? `<span style="margin-left:10px">window: <strong style="font-family:monospace">${r.window}</strong></span>` : ''}
       </div>
       <table style="width:100%; border-collapse:collapse; font-size:12px;">
         <thead>
@@ -1315,11 +1334,17 @@ function atRenderTsInfo(r) {
   }
 }
 
+// Cache key includes the year window — changing years must refetch, not reuse
+function atTsCacheKey(table) {
+  const w = atYearWindow();
+  return `${table}|${w.year_from ?? ''}|${w.year_to ?? ''}`;
+}
+
 async function atLoadTsInfo(table, db, pkCols) {
   // Restore from cache immediately if available (avoids blank on SSE re-render)
-  if (atTsInfoCache[table]) {
+  if (atTsInfoCache[atTsCacheKey(table)]) {
     const body = document.getElementById('ts-info-body');
-    if (body) body.innerHTML = atRenderTsInfo(atTsInfoCache[table]);
+    if (body) body.innerHTML = atRenderTsInfo(atTsInfoCache[atTsCacheKey(table)]);
     return;
   }
   const body = document.getElementById('ts-info-body');
@@ -1328,7 +1353,7 @@ async function atLoadTsInfo(table, db, pkCols) {
     const resp = await fetch('/api/table-timestamp-info', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ table, db, pk_cols: pkCols }),
+      body: JSON.stringify({ table, db, pk_cols: pkCols, ...atYearWindow() }),
     });
     const r = await resp.json();
     if (!resp.ok || r.error) {
@@ -1336,7 +1361,7 @@ async function atLoadTsInfo(table, db, pkCols) {
       if (el) el.innerHTML = `<span style="color:var(--red)">${r.error || 'Failed to load'}</span>`;
       return;
     }
-    atTsInfoCache[table] = r;
+    atTsInfoCache[atTsCacheKey(table)] = r;
     // Re-query element in case SSE re-rendered the drawer while we were fetching
     const el = document.getElementById('ts-info-body');
     if (el) el.innerHTML = atRenderTsInfo(r);
@@ -1809,7 +1834,7 @@ async function autoSampleOne(table) {
     const resp = await fetch('/api/random-compare', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ table, db: activeDatabase, seed: null, sample_offset: 0, sample_size: 1000 }),
+      body: JSON.stringify({ table, db: activeDatabase, seed: null, sample_offset: 0, sample_size: 1000, ...atYearWindow() }),
     });
     if (autoSampleAborted.has(table)) return;  // user opened drawer while fetching
     const result = await resp.json();
@@ -1903,9 +1928,9 @@ function atHandleEvent(ev) {
     if (ev.table === atOpenTable) {
       document.getElementById('at-drawer-body').innerHTML = atRenderDetailsContent(atOpenTable, atResults[atOpenTable]);
       // Restore ts-info from cache after re-render (SSE wipes the drawer innerHTML)
-      if (atTsInfoCache[atOpenTable]) {
+      if (atTsInfoCache[atTsCacheKey(atOpenTable)]) {
         const el = document.getElementById('ts-info-body');
-        if (el) el.innerHTML = atRenderTsInfo(atTsInfoCache[atOpenTable]);
+        if (el) el.innerHTML = atRenderTsInfo(atTsInfoCache[atTsCacheKey(atOpenTable)]);
       }
     }
     atRenderTable();
@@ -1956,6 +1981,7 @@ async function atAutoRandomCompare() {
           seed: cache.tableSeed,
           sample_offset: cache.nextOffset,
           sample_size: 1000,
+          ...atYearWindow(),
         }),
       });
       const result = await resp.json();
@@ -1995,7 +2021,7 @@ async function runSyncSelected() {
   const resp = await fetch('/api/all-tables/run', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ db: activeDatabase, skip_sync: false, sync_tables: [...atSelected] })
+    body: JSON.stringify({ db: activeDatabase, skip_sync: false, sync_tables: [...atSelected], ...atYearWindow() })
   });
   if (!resp.ok) {
     alert('Failed to start sync');
@@ -2064,7 +2090,7 @@ async function runAllTables() {
   const resp = await fetch('/api/all-tables/run', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ db: activeDatabase, skip_sync: skipSync })
+    body: JSON.stringify({ db: activeDatabase, skip_sync: skipSync, ...atYearWindow() })
   });
   if (!resp.ok) { alert('Failed to start'); btn.disabled = false; btn.classList.remove('running'); return; }
 
@@ -2558,8 +2584,30 @@ function sqlEsc(s) {
 // Initialize connection settings and database dropdown on DOM load
 window.addEventListener('DOMContentLoaded', async () => {
   await atInitSettings();
+  atInitYearWindow();
   atReplayIfAvailable();
 });
+
+// Populate year dropdowns: first option = config default ("" value → backend
+// applies the last-N-years default), then current year down to 2000.
+async function atInitYearWindow() {
+  const fromEl = document.getElementById('at-year-from');
+  const toEl = document.getElementById('at-year-to');
+  if (!fromEl || !toEl) return;
+  let defLabelFrom = 'Default';
+  const now = new Date().getFullYear();
+  try {
+    const cfg = await fetch('/api/config').then(r => r.json());
+    const n = parseInt((cfg.tuning || {}).data_window_years, 10) || 0;
+    defLabelFrom = n > 0 ? `Default (${now - n})` : 'Default (all)';
+  } catch (e) { /* non-fatal — keep generic label */ }
+  const years = [];
+  for (let y = now; y >= 2000; y--) years.push(y);
+  fromEl.innerHTML = `<option value="">${defLabelFrom}</option>` +
+    years.map(y => `<option value="${y}">${y}</option>`).join('');
+  toEl.innerHTML = `<option value="">Default (${now})</option>` +
+    years.map(y => `<option value="${y}">${y}</option>`).join('');
+}
 
 async function atReplayIfAvailable() {
   try {
@@ -2672,6 +2720,7 @@ async function rcRunRandomCompare(tableName) {
         seed: rcState.tableSeed,          // null on first call → backend generates new seed
         sample_offset: rcState.nextOffset,
         sample_size: 1000,
+        ...atYearWindow(),
       })
     });
     const result = await resp.json();

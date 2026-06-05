@@ -52,6 +52,7 @@ cp config.example.json config.json
 | `source` | host/port/user/password ของ MySQL 4.0 (ต้นทาง) |
 | `target` | host/port/user/password ของ MySQL 8 (ปลายทาง) |
 | `default_db` | ชื่อ database ที่เปิดมาให้เป็นค่าเริ่มต้นใน dashboard |
+| `tuning.data_window_years` | ตรวจเฉพาะข้อมูล N ปีปฏิทินล่าสุด — เช่น 2 ในปี 2026 = ตรวจแถวตั้งแต่ 2024-01-01 (นับจาก column วันที่ใน PK; table ที่ไม่มี column วันที่ตรวจเต็มทั้ง table) ใส่ 0 = ปิด ตรวจเต็มทุก table |
 | `tuning.workers` | จำนวน thread ที่ตรวจพร้อมกัน (ค่าแนะนำ 8) |
 | `tuning.src_timeout` | timeout (วินาที) ของ query ฝั่ง source |
 | `tuning.max_errors` | จำนวน mismatch สูงสุดที่เก็บลงรายงานต่อ table |

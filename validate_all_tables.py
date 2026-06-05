@@ -64,6 +64,67 @@ DECIMAL_TOL   = Decimal(str(_tuning.get("decimal_tol", "0.0001")))
 MAX_ERRORS    = int(_tuning.get("max_errors", 2000))
 SRC_TIMEOUT   = int(_tuning.get("src_timeout", 300))
 WORKERS       = int(_tuning.get("workers", 8))
+
+# Data window: only validate rows inside a calendar-year range.
+# Default: last N years from config (data_window_years, 0 = full table),
+# i.e. rows >= Jan 1 of (current_year - N). Overridable per run with
+# --year-from YYYY / --year-to YYYY (inclusive years).
+import datetime as _datetime
+DATA_WINDOW_YEARS = int(_tuning.get("data_window_years", 0))
+
+def _cli_int(flag: str) -> int | None:
+    if flag in sys.argv:
+        idx = sys.argv.index(flag)
+        if idx + 1 < len(sys.argv):
+            try:
+                return int(sys.argv[idx + 1])
+            except ValueError:
+                pass
+    return None
+
+_year_from = _cli_int("--year-from")
+_year_to   = _cli_int("--year-to")
+
+if _year_from is not None:
+    WINDOW_START = f"{_year_from}-01-01"
+elif DATA_WINDOW_YEARS > 0:
+    WINDOW_START = f"{_datetime.date.today().year - DATA_WINDOW_YEARS}-01-01"
+else:
+    WINDOW_START = None
+# end bound is exclusive: year_to=2025 → rows < '2026-01-01'
+WINDOW_END = f"{_year_to + 1}-01-01" if _year_to is not None else None
+
+def _window_label() -> str:
+    """Human-readable range for summaries, e.g. '2024-01-01 → 2025-12-31'."""
+    if WINDOW_START and WINDOW_END:
+        return f"{WINDOW_START} → {_year_to}-12-31"
+    if WINDOW_START:
+        return f"≥{WINDOW_START}"
+    return f"≤{_year_to}-12-31"
+
+_TS_TYPE_RE = re.compile(r"timestamp|datetime|^date")
+
+def _window_ts_col(entry: dict) -> str | None:
+    """First PK column with a date/datetime/timestamp type — the column used to
+    window data checks. None = no window (check full table)."""
+    if not (WINDOW_START or WINDOW_END):
+        return None
+    types = {r[0]: str(r[1]).lower() for r in entry.get("columns", [])}
+    for c in entry.get("pk_cols", []):
+        if _TS_TYPE_RE.search(types.get(c, "")):
+            return c
+    return None
+
+def _window_cond(ts_col: str | None) -> str:
+    """Bare condition (no WHERE keyword) limiting rows to the data window."""
+    if not ts_col:
+        return ""
+    conds = []
+    if WINDOW_START:
+        conds.append(f"`{ts_col}` >= '{WINDOW_START}'")
+    if WINDOW_END:
+        conds.append(f"`{ts_col}` < '{WINDOW_END}'")
+    return " AND ".join(conds)
 PASS = "PASS"; FAIL = "FAIL"; WARN = "WARN"; SKIP = "SKIP"
 _print_lock   = threading.Lock()   # serialise print() across worker threads
 
@@ -195,16 +256,18 @@ def _tgt_all_cols(tgt, table: str) -> list[str]:
     return result
 
 
-def _tgt_row_count(tgt, table: str) -> int:
+def _tgt_row_count(tgt, table: str, cond: str = "") -> int:
     tc = tgt.cursor()
-    tc.execute(f"SELECT COUNT(*) FROM `{table}`")
+    where = f" WHERE {cond}" if cond else ""
+    tc.execute(f"SELECT COUNT(*) FROM `{table}`{where}")
     result = int(tc.fetchone()[0])
     tc.close()
     return result
 
 
-def _src_row_count(src, table: str) -> int:
-    rows = src.query(f"SELECT COUNT(*) FROM `{table}`")
+def _src_row_count(src, table: str, cond: str = "") -> int:
+    where = f" WHERE {cond}" if cond else ""
+    rows = src.query(f"SELECT COUNT(*) FROM `{table}`{where}")
     return int(rows[0][0])
 
 
@@ -280,15 +343,18 @@ def _load_tgt_schema_cache(tgt, db: str) -> tuple[dict, dict]:
 
 
 # ─── CHECK: Row Count ─────────────────────────────────────────────────────────
-def check_row_count(table: str, src, tgt):
+def check_row_count(table: str, src, tgt, ts_col: str | None = None):
     try:
-        s = _src_row_count(src, table)
-        t = _tgt_row_count(tgt, table)
+        cond = _window_cond(ts_col)
+        s = _src_row_count(src, table, cond)
+        t = _tgt_row_count(tgt, table, cond)
         diff = s - t
         status = PASS if s == t else FAIL
+        note = f"  (window: `{ts_col}` {_window_label()})" if cond else ""
         _emit(table, "row_count", "Row Count", status, {
-            "summary": f"source={s:,}  target={t:,}  diff={diff:+,}",
+            "summary": f"source={s:,}  target={t:,}  diff={diff:+,}{note}",
             "source": s, "target": t, "diff": diff,
+            "window": _window_label() if cond else None,
         })
         return s
     except Exception as e:
@@ -467,7 +533,8 @@ def check_duplicate_pk(table: str, pk_cols: list[str], src, tgt, src_rows: int =
 HASH_CHUNKS = int(_tuning.get("hash_chunks", 100))
 
 
-def _build_hash_sql(table: str, pk_cols: list[str], all_cols: list[str], chunks: int) -> str:
+def _build_hash_sql(table: str, pk_cols: list[str], all_cols: list[str], chunks: int,
+                    cond: str = "") -> str:
     """MD5-based hash query compatible with MySQL 4.0+.
     Returns (chunk_id, row_count, value_hash) per bucket.
     Uses CONV(SUBSTRING(MD5(...),1,8),16,10) to get a numeric hash from first 8 hex chars of MD5.
@@ -477,14 +544,16 @@ def _build_hash_sql(table: str, pk_cols: list[str], all_cols: list[str], chunks:
     col_cs  = "CONCAT_WS('|', " + ", ".join(f"IFNULL(`{c}`,'')" for c in all_cols) + ")"
     chunk_e = f"MOD(CONV(SUBSTRING(MD5({pk_cs}),1,8),16,10),{chunks})"
     val_e   = f"CONV(SUBSTRING(MD5({col_cs}),1,8),16,10)"
+    where = f"WHERE {cond} " if cond else ""
     return (
         f"SELECT {chunk_e} AS c, COUNT(*) AS cnt, SUM({val_e}) AS h "
-        f"FROM `{table}` GROUP BY {chunk_e} ORDER BY {chunk_e}"
+        f"FROM `{table}` {where}GROUP BY {chunk_e} ORDER BY {chunk_e}"
     )
 
 
 def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
-                     src, where: str, src_rows_est: int) -> dict:
+                     src, where: str, src_rows_est: int,
+                     window_label: str | None = None) -> dict:
     """Two-pointer merge on filtered rows. Returns result dict.
     Reuses the caller's src connection — MySQL 4 only allows 1 concurrent
     connection per user, so opening a second one blocks indefinitely.
@@ -712,6 +781,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
             "mismatch": mismatches,
             "missing": missing,
             "extra": extra,
+            "window": window_label,
         }
         try:
             meta_path = os.path.join(reports_dir, f"{table}_compare_meta.json")
@@ -740,7 +810,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
 
 
 def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
-                    src, tgt, src_rows_est: int):
+                    src, tgt, src_rows_est: int, ts_col: str | None = None):
     if SKIP_SYNC:
         _emit(table, "full_sync", "Full Field Sync", SKIP, {"summary": "skipped (--skip-sync)"})
         return
@@ -751,10 +821,12 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
         return
 
     try:
+        window   = _window_cond(ts_col)
         chunks   = max(10, min(HASH_CHUNKS, (src_rows_est or 0) // 10_000))
-        hash_sql = _build_hash_sql(table, pk_cols, all_cols, chunks)
+        hash_sql = _build_hash_sql(table, pk_cols, all_cols, chunks, cond=window)
         pk_cs    = "CONCAT_WS('|', " + ", ".join(f"IFNULL(`{c}`,'')" for c in pk_cols) + ")"
         chunk_e  = f"MOD(CONV(SUBSTRING(MD5({pk_cs}),1,8),16,10),{chunks})"
+        win_note = f", window {_window_label()}" if window else ""
 
         # ── Phase 1: server-side hash comparison ──────────────────────────────
         # normalize hash values: MySQL 4 returns string, MySQL 8 returns float — both → int
@@ -790,23 +862,28 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
                 except: pass
 
             _emit(table, "full_sync", "Full Field Sync", PASS, {
-                "summary": f"Hash OK — {total:,} rows × {chunks} chunks all match (phase-1 only)",
+                "summary": f"Hash OK — {total:,} rows × {chunks} chunks all match (phase-1 only{win_note})",
                 "src_rows": total, "tgt_rows": total,
                 "matched": total, "mismatches": 0,
                 "missing_in_tgt": 0, "extra_in_tgt": 0,
                 "samples": [], "method": "hash",
+                "window": _window_label() if window else None,
             })
             return
 
         # ── Phase 2: stream only mismatched chunks ─────────────────────────────
         pct_bad = len(bad) / chunks * 100
+        conds = []
         if len(bad) < chunks:
             chunk_in = ",".join(map(str, bad))
-            where    = f"WHERE {chunk_e} IN ({chunk_in})"
-        else:
-            where = ""   # everything mismatches — stream all
+            conds.append(f"{chunk_e} IN ({chunk_in})")
+        # else: everything mismatches — stream all (within window)
+        if window:
+            conds.append(window)
+        where = f"WHERE {' AND '.join(conds)}" if conds else ""
 
-        result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est)
+        result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est,
+                                 window_label=_window_label() if window else None)
 
         has_errors = (result["mismatches"] > 0 or
                       result["missing_in_tgt"] > 0 or
@@ -819,9 +896,10 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
                 f"src={result['src_rows']:,}  tgt={result['tgt_rows']:,}  "
                 f"matched={matched:,}  mismatch={result['mismatches']:,}  "
                 f"missing={result['missing_in_tgt']:,}  extra={result['extra_in_tgt']:,}  "
-                f"({len(bad)}/{chunks} chunks scanned, {pct_bad:.0f}% of table)"
+                f"({len(bad)}/{chunks} chunks scanned, {pct_bad:.0f}% of table{win_note})"
             ),
             **result, "method": "stream",
+            "window": _window_label() if window else None,
         })
 
     except Exception as e:
@@ -836,6 +914,7 @@ def _process_table(table: str, src_cache: dict,
     pk_cols = entry.get("pk_cols", [])
     all_cols= entry.get("all_cols", [])
     has_pk  = bool(pk_cols)
+    ts_col  = _window_ts_col(entry)   # None → no window, check full table
 
     # Count(*) still needs a live connection — fast for MyISAM
     src = _connect_source(DATABASE)
@@ -843,7 +922,7 @@ def _process_table(table: str, src_cache: dict,
     try:
         src_rows = 0
         try:
-            src_rows = _src_row_count(src, table)
+            src_rows = _src_row_count(src, table, _window_cond(ts_col))
         except Exception:
             pass
 
@@ -851,12 +930,12 @@ def _process_table(table: str, src_cache: dict,
 
         if SYNC_ONLY_MODE:
             if has_pk:
-                check_full_sync(table, pk_cols, all_cols, src, tgt, src_rows)
+                check_full_sync(table, pk_cols, all_cols, src, tgt, src_rows, ts_col)
             else:
                 _emit(table, "full_sync", "Full Field Sync", SKIP,
                       {"summary": "no primary key"})
         else:
-            actual = check_row_count(table, src, tgt)
+            actual = check_row_count(table, src, tgt, ts_col)
             check_schema(table, src, tgt,
                          src_cache=src_cache,
                          tgt_col_cache=tgt_col_cache.get(table))
@@ -865,7 +944,7 @@ def _process_table(table: str, src_cache: dict,
                           tgt_idx_cache=tgt_idx_cache.get(table))
             if has_pk:
                 check_duplicate_pk(table, pk_cols, src, tgt, actual or src_rows)
-                check_full_sync(table, pk_cols, all_cols, src, tgt, actual or src_rows)
+                check_full_sync(table, pk_cols, all_cols, src, tgt, actual or src_rows, ts_col)
             else:
                 _emit(table, "dup_pk",    "Duplicate PK",    SKIP,
                       {"summary": "no primary key"})
