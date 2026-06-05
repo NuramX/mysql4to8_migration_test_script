@@ -607,6 +607,21 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
         def pk_of(row):
             return tuple("" if row[i] is None else str(row[i]) for i in pk_indices)
 
+        # Comparison key: numerics compared as numbers so '4702745699' (MySQL 4
+        # string) == '4702745699.0' (MySQL 8 float) and ordering matches the
+        # DB's ORDER BY ('9' < '10' numerically, not as strings). Rank prefix
+        # keeps tuple comparison type-safe: NULL < numeric < string.
+        def _pk_norm(v):
+            if v is None:
+                return (0, "")
+            s = str(v)
+            try:
+                return (1, Decimal(s))
+            except InvalidOperation:
+                return (2, s)
+        def pk_key(row):
+            return tuple(_pk_norm(row[i]) for i in pk_indices)
+
         total_src = total_tgt = mismatches = missing = extra = 0
         samples: list[dict] = []
         last_emit = 0
@@ -617,7 +632,8 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
         while s_row is not None or t_row is not None:
             if s_row is not None and t_row is not None:
                 s_pk, t_pk = pk_of(s_row), pk_of(t_row)
-                if s_pk == t_pk:
+                s_key, t_key = pk_key(s_row), pk_key(t_row)
+                if s_key == t_key:
                     total_src += 1; total_tgt += 1
                     diffs = [f"{all_cols[i]}: {s_row[i]} vs {t_row[i]}"
                              for i in range(len(all_cols))
@@ -665,7 +681,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                             ndjson_file.write(json.dumps({"type": "match", "pk": pk_str}, ensure_ascii=False) + "\n")
                     s_row = next(src_gen, None)
                     t_row = tc_ss.fetchone()
-                elif s_pk < t_pk:
+                elif s_key < t_key:
                     total_src += 1; missing += 1
                     pk_dict = {pk_cols[j]: s_pk[j] for j in range(pk_n)}
                     pk_str = ", ".join(f"{k}={v}" for k, v in pk_dict.items())

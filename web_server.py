@@ -360,7 +360,9 @@ def random_compare():
     # seed: fixed per table session (frontend sends same seed every time)
     # sample_offset: advances by sample_size each call to guarantee no repeated rows
     seed = data.get("seed") or random.randint(1, 999999)
-    sample_offset = int(data.get("sample_offset", 0))
+    # int for single-numeric-PK range mode, list of PK values (continuation
+    # anchor) for the general key-anchor mode, 0/None for a fresh start
+    sample_offset = data.get("sample_offset", 0) or 0
 
     if not table:
         return jsonify({"error": "Missing 'table' parameter"}), 400
@@ -479,40 +481,97 @@ def random_compare():
         _win_and   = f" AND {win_cond}" if win_cond else ""
 
         if use_range:
-            if sample_offset == 0:
+            if not sample_offset:
                 _mm = src_conn.query(f"SELECT MIN(`{range_pk}`), MAX(`{range_pk}`) FROM `{table}`{_win_where}")
                 _min = int(_mm[0][0]) if _mm and _mm[0][0] is not None else 0
                 _max = int(_mm[0][1]) if _mm and _mm[0][1] is not None else 0
                 _span = max(0, _max - _min - sample_size)
                 start_pk = _min + int((seed % 999983) / 999983.0 * _span)
             else:
-                start_pk = sample_offset   # continuation: last batch max_pk + 1
+                start_pk = int(sample_offset)   # continuation: last judged pk + 1
             src_sql = (
                 f"SELECT {col_list} FROM `{table}` "
                 f"WHERE `{range_pk}` >= {start_pk}{_win_and} "
                 f"ORDER BY `{range_pk}` LIMIT {sample_size}"
             )
         else:
-            if sample_offset == 0:
+            # Key-anchor mode: pick a random anchor ROW from source, then read
+            # the same PK position onward on BOTH sides. OFFSET on each side
+            # separately would desync the windows the moment row counts differ.
+            _order_by = ", ".join(f"`{c}`" for c in pk_cols)
+
+            def _esc(v):
+                return str(v).replace("\\", "\\\\").replace("'", "''")
+
+            def _pk_after(vals, inclusive):
+                """Lexicographic (pk1,pk2,..) > vals (>= when inclusive) — expanded
+                OR-AND form, works on MySQL 4 (no row-constructor comparison)."""
+                ors = []
+                for i in range(len(pk_cols)):
+                    ands = [f"`{pk_cols[j]}` = '{_esc(vals[j])}'" for j in range(i)]
+                    op = ">=" if (inclusive and i == len(pk_cols) - 1) else ">"
+                    ands.append(f"`{pk_cols[i]}` {op} '{_esc(vals[i])}'")
+                    ors.append("(" + " AND ".join(ands) + ")")
+                return "(" + " OR ".join(ors) + ")"
+
+            if not sample_offset:
                 _cnt = src_conn.query(f"SELECT COUNT(*) FROM `{table}`{_win_where}")
                 _total = int(_cnt[0][0]) if _cnt else 0
                 _max_off = max(0, _total - sample_size)
-                start_pk = int((seed % 999983) / 999983.0 * _max_off) if _max_off > 0 else 0
+                _off = int((seed % 999983) / 999983.0 * _max_off) if _max_off > 0 else 0
+                _pk_list = ", ".join(f"`{c}`" for c in pk_cols)
+                _anchor = src_conn.query(
+                    f"SELECT {_pk_list} FROM `{table}`{_win_where} "
+                    f"ORDER BY {_order_by} LIMIT 1 OFFSET {_off}")
+                anchor_vals = ["" if v is None else str(v) for v in _anchor[0]] if _anchor else None
+                _inclusive = True
             else:
-                start_pk = sample_offset
-            src_sql = f"SELECT {col_list} FROM `{table}`{_win_where} LIMIT {sample_size} OFFSET {start_pk}"
+                anchor_vals = [str(v) for v in sample_offset]   # last judged key
+                _inclusive = False
+
+            pk_pred = _pk_after(anchor_vals, _inclusive) if anchor_vals else "1=0"
+            src_sql = (f"SELECT {col_list} FROM `{table}` WHERE {pk_pred}{_win_and} "
+                       f"ORDER BY {_order_by} LIMIT {sample_size}")
 
         src_rows_raw = src_conn.query(src_sql)
 
-        # Build a dict of source rows keyed by PK
+        # Build a dict of source rows keyed by PK. Numeric components are
+        # normalized so '4702745699' (MySQL 4 string) and 4702745699.0
+        # (MySQL 8 float) key identically — float/double PKs would otherwise
+        # report every row as missing+extra.
+        from decimal import Decimal as _Dec, InvalidOperation as _DecErr
         pk_indices = [common_cols.index(c) for c in pk_cols]
+        def _pk_norm(v):
+            if v is None:
+                return (0, "")
+            s = str(v)
+            try:
+                return (1, _Dec(s))
+            except _DecErr:
+                return (2, s)
         def pk_of(row):
-            return tuple(str(row[i]) if row[i] is not None else "" for i in pk_indices)
+            return tuple(_pk_norm(row[i]) for i in pk_indices)
+        def _pk_raw(k, j):
+            """Raw value of key component j (for SQL params / display)."""
+            return str(k[j][1])
+
+        # Python-side anchor guard: the SQL predicate compares float PKs against
+        # decimal literals, so a boundary row (stored 1593.0700683 vs anchor
+        # '1593.07') can slip back into the next batch. Re-check the anchor
+        # against exact normalized keys to guarantee no repeated rows.
+        _anchor_key = None
+        if not use_range and anchor_vals is not None:
+            _anchor_key = tuple(_pk_norm(v) for v in anchor_vals)
+        def _past_anchor(key):
+            if _anchor_key is None:
+                return True
+            return key >= _anchor_key if _inclusive else key > _anchor_key
 
         src_by_pk = {}
         for row in src_rows_raw:
             pk = pk_of(row)
-            src_by_pk[pk] = row
+            if _past_anchor(pk):
+                src_by_pk[pk] = row
 
         # Query target for matching PKs
         result_rows = []
@@ -521,179 +580,117 @@ def random_compare():
         total_missing = 0
         total_extra = 0
 
-        # Batch fetch from target using IN clause on PK
-        if len(pk_cols) == 1:
-            pk_values = [pk[0] for pk in src_by_pk.keys()]
-            # Process in batches of 500
-            batch_size = 500
-            tgt_by_pk = {}
-            for i in range(0, len(pk_values), batch_size):
-                batch = pk_values[i:i + batch_size]
-                placeholders = ", ".join(["%s"] * len(batch))
-                tgt_sql = (
-                    f"SELECT {col_list} FROM `{table}` "
-                    f"WHERE `{pk_cols[0]}` IN ({placeholders})"
-                )
-                tc = tgt_conn.cursor()
-                tc.execute(tgt_sql, batch)
-                for row in tc.fetchall():
-                    pk = pk_of(row)
-                    tgt_by_pk[pk] = row
-                tc.close()
+        # ── Fetch the SAME ordered slice from target, merge in Python ────────
+        # Full-sync style: no SQL lookup by PK value (WHERE pk = <literal>
+        # can't match float/double PKs reliably — float precision). Both sides
+        # run the identical windowed/ordered query, then rows pair up by
+        # normalized key exactly like _stream_compare in validate_all_tables.
+        if use_range:
+            tgt_sql = (
+                f"SELECT {col_list} FROM `{table}` "
+                f"WHERE `{range_pk}` >= {start_pk}{_win_and} "
+                f"ORDER BY `{range_pk}` LIMIT {sample_size}"
+            )
         else:
-            # Multi-column PK: query each row individually (or use OR conditions)
-            tgt_by_pk = {}
-            pk_values_list = list(src_by_pk.keys())
-            batch_size = 200
-            for i in range(0, len(pk_values_list), batch_size):
-                batch = pk_values_list[i:i + batch_size]
-                conditions = []
-                params = []
-                for pk_vals in batch:
-                    cond = " AND ".join(f"`{pk_cols[j]}` = %s" for j in range(len(pk_cols)))
-                    conditions.append(f"({cond})")
-                    params.extend(pk_vals)
-                where = " OR ".join(conditions)
-                tgt_sql = f"SELECT {col_list} FROM `{table}` WHERE {where}"
-                tc = tgt_conn.cursor()
-                tc.execute(tgt_sql, params)
-                for row in tc.fetchall():
-                    pk = pk_of(row)
-                    tgt_by_pk[pk] = row
-                tc.close()
+            tgt_sql = (f"SELECT {col_list} FROM `{table}` WHERE {pk_pred}{_win_and} "
+                       f"ORDER BY {_order_by} LIMIT {sample_size}")
+        tc = tgt_conn.cursor()
+        tc.execute(tgt_sql)
+        tgt_rows_raw = tc.fetchall()
+        tc.close()
 
-        # Compare field-by-field: source rows vs target
-        for pk, src_row in src_by_pk.items():
-            tgt_row = tgt_by_pk.get(pk)
-            pk_dict = {pk_cols[i]: pk[i] for i in range(len(pk_cols))}
+        tgt_by_pk = {}
+        for row in tgt_rows_raw:
+            pk = pk_of(row)
+            if _past_anchor(pk):
+                tgt_by_pk[pk] = row
 
-            if tgt_row is None:
-                # Missing in target
+        # Judge missing/extra only inside the key range BOTH windows fully
+        # cover. A row absent on one side shifts that side's LIMIT window, so
+        # keys outside the overlap may exist just beyond the fetched slice —
+        # counting them would be a false positive.
+        _INF_KEY = tuple([(3, "")] * len(pk_cols))   # above any (rank, value)
+        def _hi(rows_raw, by_pk):
+            # window exhausted the table → covers everything upward
+            return _INF_KEY if len(rows_raw) < sample_size or not by_pk else max(by_pk)
+        hi_bound = min(_hi(src_rows_raw, src_by_pk), _hi(tgt_rows_raw, tgt_by_pk))
+        if src_by_pk and tgt_by_pk:
+            lo_bound = max(min(src_by_pk), min(tgt_by_pk))
+        elif src_by_pk:
+            # target empty = it has nothing ≥ anchor at all → every source row
+            # in the window is genuinely missing
+            lo_bound = min(src_by_pk)
+        elif tgt_by_pk:
+            lo_bound = min(tgt_by_pk)
+        else:
+            lo_bound = hi_bound  # both empty
+
+        for key in sorted(set(src_by_pk) | set(tgt_by_pk)):
+            if not (lo_bound <= key <= hi_bound):
+                continue   # outside the overlap — re-fetched and judged next batch
+            src_row = src_by_pk.get(key)
+            tgt_row = tgt_by_pk.get(key)
+            pk_dict = {pk_cols[i]: _pk_raw(key, i) for i in range(len(pk_cols))}
+
+            if src_row is not None and tgt_row is not None:
+                # Both exist — compare each field
                 fields = []
+                row_has_diff = False
                 for ci, col in enumerate(common_cols):
+                    sv = src_row[ci]
+                    tv = tgt_row[ci]
+                    is_match = _close_vals(sv, tv)
+                    if not is_match:
+                        row_has_diff = True
                     fields.append({
                         "column": col,
-                        "source": str(src_row[ci]) if src_row[ci] is not None else None,
-                        "target": None,
-                        "match": False,
+                        "source": str(sv) if sv is not None else None,
+                        "target": str(tv) if tv is not None else None,
+                        "match": is_match,
                     })
+                if row_has_diff:
+                    total_mismatches += 1
+                else:
+                    total_matches += 1
                 result_rows.append({
                     "pk": pk_dict,
-                    "status": "missing",
+                    "status": "mismatch" if row_has_diff else "match",
                     "fields": fields,
                 })
-                total_missing += 1
                 continue
 
-            # Both exist — compare each field
-            fields = []
-            row_has_diff = False
-            for ci, col in enumerate(common_cols):
-                sv = src_row[ci]
-                tv = tgt_row[ci]
-                is_match = _close_vals(sv, tv)
-                if not is_match:
-                    row_has_diff = True
-                fields.append({
+            if src_row is not None:
+                # Missing in target
+                fields = [{
                     "column": col,
-                    "source": str(sv) if sv is not None else None,
-                    "target": str(tv) if tv is not None else None,
-                    "match": is_match,
-                })
-
-            status = "mismatch" if row_has_diff else "match"
-            if row_has_diff:
-                total_mismatches += 1
+                    "source": str(src_row[ci]) if src_row[ci] is not None else None,
+                    "target": None,
+                    "match": False,
+                } for ci, col in enumerate(common_cols)]
+                result_rows.append({"pk": pk_dict, "status": "missing", "fields": fields})
+                total_missing += 1
             else:
-                total_matches += 1
+                # Extra in target
+                fields = [{
+                    "column": col,
+                    "source": None,
+                    "target": str(tgt_row[ci]) if tgt_row[ci] is not None else None,
+                    "match": False,
+                } for ci, col in enumerate(common_cols)]
+                result_rows.append({"pk": pk_dict, "status": "extra", "fields": fields})
+                total_extra += 1
 
-            result_rows.append({
-                "pk": pk_dict,
-                "status": status,
-                "fields": fields,
-            })
-
-        # Detect extra rows: sample TARGET with same range/offset, find rows not in source
-        try:
-            if use_range:
-                tgt_sample_sql = (
-                    f"SELECT {col_list} FROM `{table}` "
-                    f"WHERE `{range_pk}` >= {start_pk}{_win_and} "
-                    f"ORDER BY `{range_pk}` LIMIT {sample_size}"
-                )
-            else:
-                tgt_sample_sql = (
-                    f"SELECT {col_list} FROM `{table}`{_win_where} "
-                    f"LIMIT {sample_size} OFFSET {start_pk}"
-                )
-            tc = tgt_conn.cursor()
-            tc.execute(tgt_sample_sql)
-            tgt_sample_rows = tc.fetchall()
-            tc.close()
-
-            tgt_sample_pks = set()
-            for row in tgt_sample_rows:
-                pk = pk_of(row)
-                tgt_sample_pks.add(pk)
-
-            # Find PKs in target sample that aren't in source sample
-            extra_pks = tgt_sample_pks - set(src_by_pk.keys())
-
-            # Verify these extras really don't exist in source
-            # (they might exist in source but just weren't in the random sample)
-            # We do a quick lookup in source to confirm
-            for epk in list(extra_pks)[:200]:  # limit to avoid overwhelming source
-                pk_dict = {pk_cols[i]: epk[i] for i in range(len(pk_cols))}
-
-                # Find the target row data
-                tgt_row = None
-                for row in tgt_sample_rows:
-                    if pk_of(row) == epk:
-                        tgt_row = row
-                        break
-
-                if tgt_row is None:
-                    continue
-
-                # Check if this PK exists in source
-                if len(pk_cols) == 1:
-                    check_sql = f"SELECT COUNT(*) FROM `{table}` WHERE `{pk_cols[0]}` = '{epk[0]}'"
-                else:
-                    where_parts = " AND ".join(
-                        f"`{pk_cols[j]}` = '{epk[j]}'" for j in range(len(pk_cols))
-                    )
-                    check_sql = f"SELECT COUNT(*) FROM `{table}` WHERE {where_parts}"
-
-                try:
-                    src_check = src_conn.query(check_sql)
-                    exists_in_src = int(src_check[0][0]) > 0
-                except Exception:
-                    exists_in_src = True  # assume exists if query fails
-
-                if not exists_in_src:
-                    fields = []
-                    for ci, col in enumerate(common_cols):
-                        fields.append({
-                            "column": col,
-                            "source": None,
-                            "target": str(tgt_row[ci]) if tgt_row[ci] is not None else None,
-                            "match": False,
-                        })
-                    result_rows.append({
-                        "pk": pk_dict,
-                        "status": "extra",
-                        "fields": fields,
-                    })
-                    total_extra += 1
-        except Exception:
-            pass  # extra detection is best-effort
-
-        # next_offset: for range mode = max PK in batch + 1; for offset mode = start + size
-        if use_range and src_rows_raw:
-            _pk_idx = common_cols.index(range_pk)
-            next_offset = int(src_rows_raw[-1][_pk_idx]) + 1
+        # next_offset: continuation = last JUDGED key (hi_bound). Keys beyond it
+        # were skipped this batch and will be re-fetched next call — no gaps,
+        # no repeats.
+        _all_keys = sorted(set(src_by_pk) | set(tgt_by_pk))
+        _judged_hi = hi_bound if hi_bound != _INF_KEY else (_all_keys[-1] if _all_keys else None)
+        if use_range:
+            next_offset = (int(float(_pk_raw(_judged_hi, 0))) + 1) if _judged_hi else (start_pk if isinstance(start_pk, int) else 0)
+        elif _judged_hi is not None:
+            next_offset = [_pk_raw(_judged_hi, j) for j in range(len(pk_cols))]
         else:
-            next_offset = start_pk + sample_size
+            next_offset = sample_offset or 0
 
         return jsonify({
             "seed": seed,
