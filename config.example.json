@@ -1,0 +1,22 @@
+{
+  "source": {
+    "host": "SOURCE_DB_HOST",
+    "port": 3306,
+    "user": "YOUR_USER",
+    "password": "YOUR_PASSWORD"
+  },
+  "target": {
+    "host": "TARGET_DB_HOST",
+    "port": 3306,
+    "user": "YOUR_USER",
+    "password": "YOUR_PASSWORD"
+  },
+  "default_db": "technical",
+  "tuning": {
+    "workers": 8,
+    "src_timeout": 300,
+    "max_errors": 2000,
+    "decimal_tol": "0.0001",
+    "hash_chunks": 100
+  }
+}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+config.json
+static/reports/
+.venv/
+timestamp_pk_columns.csv
