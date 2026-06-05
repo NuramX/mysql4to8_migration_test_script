@@ -2036,6 +2036,11 @@ async function runSyncSelected() {
   btn.classList.add('running');
   document.getElementById('at-run-time').textContent = `Running full sync on ${atSelected.size} table(s)…`;
 
+  // Stop any running process first (handles mid-sync refresh case where
+  // sendBeacon fired but process hasn't died yet).  Stop endpoint blocks
+  // until process is actually dead so the /run call won't hit 409.
+  try { await fetch('/api/all-tables/stop', { method: 'POST' }); } catch (e) { /* ignore */ }
+
   // Snapshot all existing results — server resets its buffer on every /run call,
   // so only selected-table events come back.  We restore non-selected tables
   // from this snapshot after the stream ends so their data is never lost.
@@ -2043,6 +2048,16 @@ async function runSyncSelected() {
   Object.entries(atResults).forEach(([k, v]) => {
     snapshot[k] = { ...v, checks: { ...v.checks }, checks_data: { ...v.checks_data } };
   });
+
+  // Persist snapshot to sessionStorage so a mid-run page refresh can restore
+  // non-selected tables that the server snapshot won't cover.
+  try {
+    sessionStorage.setItem('_syncSnapshot', JSON.stringify({
+      snapshot,
+      syncTables: [...atSelected],
+      db: activeDatabase,
+    }));
+  } catch (e) { /* sessionStorage full — non-fatal */ }
 
   const resp = await fetch('/api/all-tables/run', {
     method: 'POST',
@@ -2064,6 +2079,8 @@ async function runSyncSelected() {
         btn.disabled = false; btn.classList.remove('running');
         document.getElementById('at-run-time').textContent = 'Full sync completed';
         atEs.close(); atEs = null;
+        sessionStorage.removeItem('_syncSnapshot');   // clean up — completed normally
+        window.removeEventListener('beforeunload', _syncBeforeUnload);
         // Restore any non-selected table that lost its data during this run
         Object.entries(snapshot).forEach(([k, v]) => {
           if (!atSelected.has(k) && !atResults[k]) atResults[k] = v;
@@ -2088,6 +2105,15 @@ async function runSyncSelected() {
     } catch (ex) { console.warn('sync SSE parse error', ex); }
   };
   atEs.onerror = () => { atEs.close(); atEs = null; };
+
+  // Stop server process if user navigates away / refreshes mid-sync.
+  // sessionStorage already holds the snapshot — on next load it will be restored.
+  window.addEventListener('beforeunload', _syncBeforeUnload);
+}
+
+function _syncBeforeUnload() {
+  navigator.sendBeacon('/api/all-tables/stop');
+  window.removeEventListener('beforeunload', _syncBeforeUnload);
 }
 
 async function runAllTables() {
@@ -2637,7 +2663,15 @@ async function atInitYearWindow() {
 
 async function atReplayIfAvailable() {
   try {
-    const status = await fetch('/api/all-tables/status').then(r => r.json());
+    let status = await fetch('/api/all-tables/status').then(r => r.json());
+
+    // If a sync was interrupted (sendBeacon fired but process still alive),
+    // stop it now and wait for it to die so snapshot is up-to-date.
+    if (status.running) {
+      await fetch('/api/all-tables/stop', { method: 'POST' }).catch(() => {});
+      status = await fetch('/api/all-tables/status').then(r => r.json());
+    }
+
     if (status.snapshot > 0) {
       // Server has a merged snapshot of all runs — replay it to restore atResults
       const { events } = await fetch('/api/all-tables/snapshot').then(r => r.json());
@@ -2654,6 +2688,24 @@ async function atReplayIfAvailable() {
         catch (ex) { console.warn('replay SSE parse error', ex); }
       };
       atEs.onerror = () => { atEs.close(); atEs = null; };
+    }
+
+    // Restore any table missing from atResults using the pre-sync snapshot
+    // saved to sessionStorage before the interrupted run started.
+    // This covers BOTH non-selected tables (server snapshot omits them while
+    // run is in progress) AND selected tables that didn't complete before refresh.
+    const saved = sessionStorage.getItem('_syncSnapshot');
+    if (saved) {
+      try {
+        const { snapshot: savedSnap, db: savedDb } = JSON.parse(saved);
+        if (savedDb === activeDatabase && savedSnap) {
+          Object.entries(savedSnap).forEach(([k, v]) => {
+            if (!atResults[k]) atResults[k] = v;   // don't overwrite fresher server data
+          });
+          atRenderTable();
+        }
+      } catch (e) { /* corrupt entry — ignore */ }
+      sessionStorage.removeItem('_syncSnapshot');
     }
   } catch (e) {
     // server not ready yet, ignore

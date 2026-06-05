@@ -59,23 +59,54 @@ def _reset_state(sync_tables: list | None = None):
 
 
 def _merge_snapshot(new_events: list[str], sync_tables: list[str]) -> list[str]:
-    """Return updated snapshot: full run replaces all; sync-only updates selected tables."""
+    """Return updated snapshot: full run replaces all; sync-only updates selected tables.
+
+    For sync runs we do a fine-grained merge: keep every old event for
+    selected tables EXCEPT the ones the new run re-emits.  This preserves
+    row_count / schema / indexes / dup_pk results from a prior validation
+    run when only full_sync is re-run.
+    """
     non_done = [e for e in new_events if '"type": "done"' not in e]
     done_events = [e for e in new_events if '"type": "done"' in e]
     if not sync_tables:
         return non_done + done_events
-    # Keep existing events for tables NOT in this sync run
+
+    sync_set = set(sync_tables)
+
+    # Collect which (table, check) pairs and which table_starts the new run emits
+    new_checks: set[tuple[str, str]] = set()
+    new_table_starts: set[str] = set()
+    for e in non_done:
+        try:
+            ev = json.loads(e)
+            t = ev.get("table")
+            if not t or t not in sync_set:
+                continue
+            if ev.get("type") == "table_start":
+                new_table_starts.add(t)
+            elif ev.get("type") == "result":
+                new_checks.add((t, ev.get("check", "")))
+        except Exception:
+            pass
+
+    # Keep old snapshot events, skipping only the specific events the new run replaces
     kept = []
     for line in _snapshot:
         if '"type": "done"' in line:
             continue
         try:
             ev = json.loads(line)
-            if ev.get("table") in sync_tables:
-                continue   # will be replaced by new events
+            t = ev.get("table")
+            if t in sync_set:
+                etype = ev.get("type")
+                if etype == "table_start" and t in new_table_starts:
+                    continue  # replaced by new table_start
+                if etype == "result" and (t, ev.get("check", "")) in new_checks:
+                    continue  # replaced by new result event
         except Exception:
             pass
         kept.append(line)
+
     return kept + non_done + done_events
 
 
@@ -159,6 +190,22 @@ def at_run_validation():
     t = threading.Thread(target=_reader_thread, args=(_process,), daemon=True)
     t.start()
     return jsonify({"started": True, "db": db})
+
+
+@app.route("/api/all-tables/stop", methods=["POST"])
+def at_stop():
+    """Terminate the running validation/sync process and wait until it is dead."""
+    global _process
+    stopped = False
+    with _process_lock:
+        if _process is not None and _process.poll() is None:
+            _process.terminate()
+            stopped = True
+    if stopped:
+        # Block until reader_thread has finished and _snapshot has been updated.
+        # This ensures that a /run call immediately after /stop won't hit 409.
+        _run_done.wait(timeout=15)
+    return jsonify({"stopped": stopped})
 
 
 @app.route("/api/all-tables/stream")
@@ -1177,10 +1224,14 @@ def get_full_compare_paged():
                         line = line.strip()
                         if not line:
                             continue
-                        idx = line.find('"type":"')
+                        idx = line.find('"type": "')
                         if idx == -1:
-                            continue
-                        idx += 8
+                            idx = line.find('"type":"')
+                            if idx == -1:
+                                continue
+                            idx += 8
+                        else:
+                            idx += 9
                         end = line.find('"', idx)
                         rtype = line[idx:end]
                         tc["all"] += 1

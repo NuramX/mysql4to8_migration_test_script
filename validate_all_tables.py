@@ -798,9 +798,9 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                 last_emit = matched
                 _emit_progress(table, matched, src_rows_est)
 
-        matched = total_src - missing
+        matched = total_src - missing - mismatches
         meta = {
-            "all": mismatches + missing + extra,
+            "all": matched + mismatches + missing + extra,
             "match": matched,
             "mismatch": mismatches,
             "missing": missing,
