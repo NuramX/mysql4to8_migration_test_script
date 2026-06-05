@@ -282,6 +282,26 @@ def post_config():
         "default_db": data.get("default_db", "prs")
     })
 
+    # Optional numeric-comparison tuning from the Settings UI
+    if "tuning" in data and isinstance(data["tuning"], dict):
+        tuning = cfg.setdefault("tuning", {})
+        t_in = data["tuning"]
+        if "decimal_round" in t_in:
+            dr = t_in["decimal_round"]
+            if dr is None or str(dr).strip() == "":
+                tuning.pop("decimal_round", None)   # blank = off, fall back to tolerance
+            else:
+                try:
+                    tuning["decimal_round"] = max(0, int(dr))
+                except (TypeError, ValueError):
+                    return jsonify({"error": "decimal_round must be an integer"}), 400
+        if "decimal_tol" in t_in and str(t_in["decimal_tol"]).strip() != "":
+            try:
+                Decimal(str(t_in["decimal_tol"]))
+            except InvalidOperation:
+                return jsonify({"error": "decimal_tol must be a number"}), 400
+            tuning["decimal_tol"] = str(t_in["decimal_tol"])
+
     if _save_config(cfg):
         return jsonify({"success": True})
     else:
@@ -326,11 +346,22 @@ def get_databases():
 
 # ─── Random Field-by-Field Comparison ──────────────────────────────────────────
 import random
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-DECIMAL_TOL = Decimal("0.0001")
 
-def _close_vals(a, b):
+def _numeric_cmp_params(cfg):
+    """(tolerance, round_places) from config tuning — same semantics as
+    validate_all_tables: decimal_round set → round-and-compare wins,
+    otherwise abs-diff tolerance. Read per request so Settings saves apply
+    without a server restart."""
+    tuning = cfg.get("tuning") or {}
+    tol = Decimal(str(tuning.get("decimal_tol", "0.0001")))
+    dr = tuning.get("decimal_round")
+    rnd = int(dr) if dr is not None and str(dr).strip() != "" else None
+    return tol, rnd
+
+
+def _close_vals(a, b, tol=Decimal("0.0001"), rnd=None):
     """Check if two values are 'close enough' (handles decimals, nulls, strings)."""
     if a is None and b is None:
         return True
@@ -340,7 +371,11 @@ def _close_vals(a, b):
     if sa == sb:
         return True
     try:
-        return abs(Decimal(sa) - Decimal(sb)) <= DECIMAL_TOL
+        da, db = Decimal(sa), Decimal(sb)
+        if rnd is not None:
+            q = Decimal(1).scaleb(-rnd)   # 10^-N
+            return da.quantize(q, rounding=ROUND_HALF_UP) == db.quantize(q, rounding=ROUND_HALF_UP)
+        return abs(da - db) <= tol
     except (InvalidOperation, ValueError):
         return False
 
@@ -479,6 +514,8 @@ def random_compare():
 
         _win_where = f" WHERE {win_cond}" if win_cond else ""
         _win_and   = f" AND {win_cond}" if win_cond else ""
+
+        _tol, _rnd = _numeric_cmp_params(cfg)
 
         if use_range:
             if not sample_offset:
@@ -639,7 +676,7 @@ def random_compare():
                 for ci, col in enumerate(common_cols):
                     sv = src_row[ci]
                     tv = tgt_row[ci]
-                    is_match = _close_vals(sv, tv)
+                    is_match = _close_vals(sv, tv, _tol, _rnd)
                     if not is_match:
                         row_has_diff = True
                     fields.append({
@@ -825,20 +862,29 @@ def table_timestamp_info():
                             .strip(".") if (ts_col and (win_start or win_end)) else None)
 
         if ts_col:
-            # Query MIN/MAX from source (within year window on the ts column)
-            src_rows = src_conn.query(
-                f"SELECT MIN(`{ts_col}`), MAX(`{ts_col}`) FROM `{table}`{_win_where(ts_col)}"
-            )
-            src_min = str(src_rows[0][0]) if src_rows and src_rows[0][0] is not None else None
-            src_max = str(src_rows[0][1]) if src_rows and src_rows[0][1] is not None else None
+            # MIN/MAX via ORDER BY + LIMIT 1 instead of MIN()/MAX() with a
+            # range WHERE — aggregate over a windowed range scans every index
+            # entry in the window (30M+ rows on big tables), while an ordered
+            # LIMIT 1 is a single index seek per end when ts_col is indexed.
+            # Without an index it degrades to the same scan as before.
+            def _edge_sql(direction):
+                return (f"SELECT `{ts_col}` FROM `{table}`{_win_where(ts_col)} "
+                        f"ORDER BY `{ts_col}` {direction} LIMIT 1")
 
-            # Query MIN/MAX from target
+            def _one(rows):
+                return str(rows[0][0]) if rows and rows[0][0] is not None else None
+
+            src_min = _one(src_conn.query(_edge_sql("ASC")))
+            src_max = _one(src_conn.query(_edge_sql("DESC")))
+
             tc = tgt_conn.cursor()
-            tc.execute(f"SELECT MIN(`{ts_col}`), MAX(`{ts_col}`) FROM `{table}`{_win_where(ts_col)}")
-            tgt_row = tc.fetchone()
+            tc.execute(_edge_sql("ASC"))
+            r_min = tc.fetchone()
+            tc.execute(_edge_sql("DESC"))
+            r_max = tc.fetchone()
             tc.close()
-            tgt_min = str(tgt_row[0]) if tgt_row and tgt_row[0] is not None else None
-            tgt_max = str(tgt_row[1]) if tgt_row and tgt_row[1] is not None else None
+            tgt_min = str(r_min[0]) if r_min and r_min[0] is not None else None
+            tgt_max = str(r_max[0]) if r_max and r_max[0] is not None else None
 
             result.update({
                 "source_min": src_min, "source_max": src_max,

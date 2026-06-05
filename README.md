@@ -56,7 +56,8 @@ cp config.example.json config.json
 | `tuning.workers` | จำนวน thread ที่ตรวจพร้อมกัน (ค่าแนะนำ 8) |
 | `tuning.src_timeout` | timeout (วินาที) ของ query ฝั่ง source |
 | `tuning.max_errors` | จำนวน mismatch สูงสุดที่เก็บลงรายงานต่อ table |
-| `tuning.decimal_tol` | ค่าความคลาดเคลื่อนที่ยอมรับได้ของเลขทศนิยม |
+| `tuning.decimal_tol` | ค่าความคลาดเคลื่อนที่ยอมรับได้ของเลขทศนิยม (ใช้เมื่อไม่ตั้ง `decimal_round`) |
+| `tuning.decimal_round` | ปัดทศนิยมทั้งสองฝั่งเป็น N ตำแหน่งก่อนเทียบ — ตั้งแล้วมีผลแทน `decimal_tol`, `null` = ปิด (ตั้งจากหน้าเว็บ Settings ได้) |
 | `tuning.hash_chunks` | จำนวน chunk ตอนทำ checksum เทียบข้อมูล |
 
 > ⚠️ **ห้าม commit `config.json` ขึ้น git** — ไฟล์นี้มีรหัสผ่านจริง

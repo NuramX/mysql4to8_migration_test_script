@@ -14,7 +14,7 @@ import threading
 import MySQLdb
 import MySQLdb.cursors
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 import os as _os
@@ -61,6 +61,10 @@ elif "--sync-tables" in sys.argv:
         SYNC_ONLY_MODE = True
 
 DECIMAL_TOL   = Decimal(str(_tuning.get("decimal_tol", "0.0001")))
+# decimal_round: round both sides to N decimal places before comparing
+# (takes precedence over decimal_tol). None/absent = use tolerance.
+_dr = _tuning.get("decimal_round")
+DECIMAL_ROUND = int(_dr) if _dr is not None and str(_dr).strip() != "" else None
 MAX_ERRORS    = int(_tuning.get("max_errors", 2000))
 SRC_TIMEOUT   = int(_tuning.get("src_timeout", 300))
 WORKERS       = int(_tuning.get("workers", 8))
@@ -286,7 +290,11 @@ def _close(a, b) -> bool:
     if a is None or b is None:
         return False
     try:
-        return abs(Decimal(str(a)) - Decimal(str(b))) <= DECIMAL_TOL
+        da, db = Decimal(str(a)), Decimal(str(b))
+        if DECIMAL_ROUND is not None:
+            q = Decimal(1).scaleb(-DECIMAL_ROUND)   # 10^-N, e.g. N=2 -> 0.01
+            return da.quantize(q, rounding=ROUND_HALF_UP) == db.quantize(q, rounding=ROUND_HALF_UP)
+        return abs(da - db) <= DECIMAL_TOL
     except InvalidOperation:
         return str(a) == str(b)
 

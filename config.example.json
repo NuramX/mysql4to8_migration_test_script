@@ -18,6 +18,7 @@
     "src_timeout": 300,
     "max_errors": 2000,
     "decimal_tol": "0.0001",
+    "decimal_round": null,
     "hash_chunks": 100
   }
 }
