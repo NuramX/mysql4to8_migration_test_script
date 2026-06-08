@@ -864,33 +864,18 @@ def table_timestamp_info():
             charset="utf8mb4",
         )
 
-        # Find the best date/time column to use for MIN/MAX range display.
-        # Strategy: scan ALL columns on source (in definition order), pick the
-        # first one whose type is date/time on BOTH source and target — i.e. not
-        # a type mismatch (orange).  If no such column exists → fall back to
-        # row-count comparison.
-        def _is_date_type(t):
-            t = t.lower().strip()
-            return "timestamp" in t or "datetime" in t or t.startswith("date")
+        # Look up the designated MIN/MAX column from ts_field_config.json.
+        # This config is generated from the Numbers condition file where each
+        # table's primary date/time field is manually curated (orange = skip).
+        # Tables not in the config fall back to row-count comparison.
+        _TS_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts_field_config.json")
+        try:
+            with open(_TS_CONFIG_PATH, "r", encoding="utf-8") as _f:
+                _ts_config = json.load(_f)
+        except Exception:
+            _ts_config = {}
 
-        src_col_rows = src_conn.query(f"SHOW COLUMNS FROM `{table}`")
-        # SHOW COLUMNS: Field, Type, Null, Key, Default, Extra
-        src_col_types = {r[0]: r[1].lower() for r in src_col_rows}
-
-        tc = tgt_conn.cursor()
-        tc.execute(f"SHOW COLUMNS FROM `{table}`")
-        tgt_col_types = {r[0]: r[1].lower() for r in tc.fetchall()}
-        tc.close()
-
-        ts_col = None
-        for col, src_type in src_col_types.items():
-            if not _is_date_type(src_type):
-                continue
-            tgt_type = tgt_col_types.get(col, "")
-            if not _is_date_type(tgt_type):
-                continue  # type mismatch (orange) — skip
-            ts_col = col
-            break
+        ts_col = _ts_config.get(db, {}).get(table)
 
         result = {"has_ts_pk": ts_col is not None, "ts_col": ts_col}
 
