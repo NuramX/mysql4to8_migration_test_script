@@ -912,15 +912,23 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
                 try: os.remove(csv_path)
                 except: pass
 
-            _emit(table, "full_sync", "Full Field Sync", PASS, {
-                "summary": f"Hash OK — {total:,} rows × {chunks} chunks all match (phase-1 only{win_note})",
-                "src_rows": total, "tgt_rows": total,
-                "matched": total, "mismatches": 0,
-                "missing_in_tgt": 0, "extra_in_tgt": 0,
-                "samples": [], "method": "hash",
-                "window": _window_label() if window else None,
-            })
-            return
+            # Tables not in ts_field_config have no year window — they are
+            # typically small master/reference tables.  Always run full row-by-row
+            # so the Full Comparison View has data to display even on PASS.
+            in_config = table in _TS_FIELD_CONFIG.get(DATABASE, {})
+            if not in_config:
+                # Fall through to phase-2 path (stream all chunks = no bad filter)
+                bad = list(range(chunks))
+            else:
+                _emit(table, "full_sync", "Full Field Sync", PASS, {
+                    "summary": f"Hash OK — {total:,} rows × {chunks} chunks all match (phase-1 only{win_note})",
+                    "src_rows": total, "tgt_rows": total,
+                    "matched": total, "mismatches": 0,
+                    "missing_in_tgt": 0, "extra_in_tgt": 0,
+                    "samples": [], "method": "hash",
+                    "window": _window_label() if window else None,
+                })
+                return
 
         # ── Phase 2: stream only mismatched chunks ─────────────────────────────
         pct_bad = len(bad) / chunks * 100
