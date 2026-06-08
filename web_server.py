@@ -864,42 +864,33 @@ def table_timestamp_info():
             charset="utf8mb4",
         )
 
-        # Determine which PK columns are TIMESTAMP/DATETIME.
-        # Use pk_cols_hint from the frontend (derived from SHOW INDEX on source)
-        # then check column types via SHOW COLUMNS on source — more reliable than
-        # querying information_schema on target which may have different types.
-        if pk_cols_hint:
-            col_rows = src_conn.query(f"SHOW COLUMNS FROM `{table}`")
-            # SHOW COLUMNS: Field, Type, Null, Key, Default, Extra
-            src_col_types = {r[0]: r[1].lower() for r in col_rows}
-            ts_col = None
-            for col in pk_cols_hint:
-                ctype = src_col_types.get(col, "")
-                if "timestamp" in ctype or "datetime" in ctype or ctype.strip().startswith("date"):
-                    ts_col = col
-                    break
-        else:
-            # Fallback: ask target information_schema (original behaviour)
-            tc = tgt_conn.cursor()
-            tc.execute("""
-                SELECT kcu.column_name, c.data_type
-                FROM information_schema.key_column_usage kcu
-                JOIN information_schema.columns c
-                  ON c.table_schema = kcu.table_schema
-                 AND c.table_name   = kcu.table_name
-                 AND c.column_name  = kcu.column_name
-                WHERE kcu.table_schema = %s
-                  AND kcu.table_name   = %s
-                  AND kcu.constraint_name = 'PRIMARY'
-                ORDER BY kcu.ordinal_position
-            """, (db, table))
-            pk_info = tc.fetchall()
-            tc.close()
-            ts_col = None
-            for col_name, data_type in pk_info:
-                if data_type.lower() in ("timestamp", "datetime", "date"):
-                    ts_col = col_name
-                    break
+        # Find the best date/time column to use for MIN/MAX range display.
+        # Strategy: scan ALL columns on source (in definition order), pick the
+        # first one whose type is date/time on BOTH source and target — i.e. not
+        # a type mismatch (orange).  If no such column exists → fall back to
+        # row-count comparison.
+        def _is_date_type(t):
+            t = t.lower().strip()
+            return "timestamp" in t or "datetime" in t or t.startswith("date")
+
+        src_col_rows = src_conn.query(f"SHOW COLUMNS FROM `{table}`")
+        # SHOW COLUMNS: Field, Type, Null, Key, Default, Extra
+        src_col_types = {r[0]: r[1].lower() for r in src_col_rows}
+
+        tc = tgt_conn.cursor()
+        tc.execute(f"SHOW COLUMNS FROM `{table}`")
+        tgt_col_types = {r[0]: r[1].lower() for r in tc.fetchall()}
+        tc.close()
+
+        ts_col = None
+        for col, src_type in src_col_types.items():
+            if not _is_date_type(src_type):
+                continue
+            tgt_type = tgt_col_types.get(col, "")
+            if not _is_date_type(tgt_type):
+                continue  # type mismatch (orange) — skip
+            ts_col = col
+            break
 
         result = {"has_ts_pk": ts_col is not None, "ts_col": ts_col}
 
