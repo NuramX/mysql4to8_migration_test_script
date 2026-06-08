@@ -909,10 +909,27 @@ def table_timestamp_info():
             tgt_min = str(r_min[0]) if r_min and r_min[0] is not None else None
             tgt_max = str(r_max[0]) if r_max and r_max[0] is not None else None
 
-            result.update({
-                "source_min": src_min, "source_max": src_max,
-                "target_min": tgt_min, "target_max": tgt_max,
-            })
+            # If both sides have no data at all → fall back to row count
+            if src_min is None and src_max is None and tgt_min is None and tgt_max is None:
+                result["has_ts_pk"] = False
+                result["ts_col"] = None
+                result["window"] = None
+                src_cnt_rows = src_conn.query(f"SELECT COUNT(*) FROM `{table}`")
+                src_count = int(src_cnt_rows[0][0]) if src_cnt_rows else 0
+                tc2 = tgt_conn.cursor()
+                tc2.execute(f"SELECT COUNT(*) FROM `{table}`")
+                tgt_count = int(tc2.fetchone()[0])
+                tc2.close()
+                result.update({
+                    "source_count": src_count,
+                    "target_count": tgt_count,
+                    "counts_match": src_count == tgt_count,
+                })
+            else:
+                result.update({
+                    "source_min": src_min, "source_max": src_max,
+                    "target_min": tgt_min, "target_max": tgt_max,
+                })
         else:
             # Query COUNT(*) from both
             src_cnt_rows = src_conn.query(f"SELECT COUNT(*) FROM `{table}`")
