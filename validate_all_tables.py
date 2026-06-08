@@ -686,7 +686,13 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                             })
                     else:
                         if ndjson_file:
-                            ndjson_file.write(json.dumps({"type": "match", "pk": pk_str}, ensure_ascii=False) + "\n")
+                            ndjson_file.write(json.dumps({
+                                "type": "match", "pk": pk_str,
+                                "cols": all_cols,
+                                "src": [str(s_row[i]) if s_row[i] is not None else None for i in range(len(all_cols))],
+                                "tgt": [str(t_row[i]) if t_row[i] is not None else None for i in range(len(all_cols))],
+                                "diffs": [False] * len(all_cols),
+                            }, ensure_ascii=False) + "\n")
                     s_row = next(src_gen, None)
                     t_row = tc_ss.fetchone()
                 elif s_key < t_key:
