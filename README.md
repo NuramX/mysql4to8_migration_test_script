@@ -105,6 +105,7 @@ web_server.py            Flask server + SSE stream + REST API (port 5001)
 validate_all_tables.py   ตัวตรวจหลัก — รันเป็น subprocess จาก web server หรือรันเองก็ได้
 mysql40.py               MySQL 4.0 connector (raw socket, old password protocol)
 config.json              ข้อมูลเชื่อมต่อ DB (สร้างเองจาก config.example.json — ห้าม commit)
+ts_field_config.json     ค่ากำหนดคอลัมน์วันที่หลักของแต่ละตาราง สำหรับใช้ดึงข้อมูล MIN/MAX (ช่วงเวลาข้อมูล)
 static/                  หน้าเว็บ dashboard
 static/reports/          รายงานผลตรวจ (สร้างอัตโนมัติ)
 ```
