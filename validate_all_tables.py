@@ -108,11 +108,32 @@ def _window_label() -> str:
 
 _TS_TYPE_RE = re.compile(r"timestamp|datetime|^date")
 
+# Load curated ts column config (same source as web's table-timestamp-info).
+# Keys: db -> table -> column_name.  Generated from condition Numbers file.
+_TS_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts_field_config.json")
+try:
+    with open(_TS_CONFIG_PATH, "r", encoding="utf-8") as _f:
+        _TS_FIELD_CONFIG: dict = json.load(_f)
+except Exception:
+    _TS_FIELD_CONFIG = {}
+
 def _window_ts_col(entry: dict) -> str | None:
-    """First PK column with a date/datetime/timestamp type — the column used to
-    window data checks. None = no window (check full table)."""
+    """Return the column used to apply the year-range window for this table.
+
+    Lookup order:
+      1. ts_field_config.json (curated, matches web's MIN/MAX column)
+      2. Fallback: first PK column with a date/datetime/timestamp type
+    Returns None when no window is configured or no suitable column found.
+    """
     if not (WINDOW_START or WINDOW_END):
         return None
+    db    = entry.get("db", DATABASE)
+    table = entry.get("table", "")
+    # 1. curated config
+    col = _TS_FIELD_CONFIG.get(db, {}).get(table)
+    if col:
+        return col
+    # 2. fallback: first PK col with date/time type
     types = {r[0]: str(r[1]).lower() for r in entry.get("columns", [])}
     for c in entry.get("pk_cols", []):
         if _TS_TYPE_RE.search(types.get(c, "")):
