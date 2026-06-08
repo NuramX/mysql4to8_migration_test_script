@@ -1291,7 +1291,7 @@ function atOpenDrawer(table) {
   overlay.classList.add('active');
   drawer.classList.add('active');
 
-  if (d.checks && d.checks.full_sync === 'FAIL') {
+  if (d.checks && d.checks.full_sync) {
     setTimeout(() => { atFcInit(table); atExpInit(table); }, 150);
   }
 
@@ -2405,8 +2405,8 @@ function atBuildMismatchesExplorerHtml(table, d) {
   const sync = cd.full_sync || {};
   const syncStatus = sync.status || 'SKIP';
   
-  if (syncStatus !== 'FAIL') {
-    return ''; // Only show explorer if full sync fails (has discrepancies)
+  if (!syncStatus || syncStatus === 'SKIP') {
+    return ''; // Only show explorer if full sync ran (PASS or FAIL)
   }
   
   return `
