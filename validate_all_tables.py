@@ -580,13 +580,74 @@ def _build_hash_sql(table: str, pk_cols: list[str], all_cols: list[str], chunks:
     )
 
 
+# Keyset (seek) pagination chunk size. Each page is fetched with
+# `ORDER BY pk LIMIT N`, which lets the DB walk the PK index and stop early
+# instead of sorting the whole filtered set on disk (avoids tmpdir filesort).
+KEYSET_CHUNK = int(_tuning.get("keyset_chunk_size", 50000))
+
+
+def _sql_lit(v) -> str:
+    """Quote a value as a MySQL string literal. PK columns are NOT NULL, so
+    the column type drives comparison semantics (numeric col → numeric compare,
+    char col → string compare), matching the DB's own ORDER BY."""
+    if v is None:
+        return "NULL"
+    s = str(v)
+    return "'" + s.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _keyset_cond(pk_cols: list[str], last_vals: tuple) -> str:
+    """Row-value boundary for keyset pagination over a (possibly composite) PK.
+    For PK (a,b,c) after (la,lb,lc):
+      (a>la) OR (a=la AND b>lb) OR (a=la AND b=lb AND c>lc)
+    """
+    ors = []
+    for i in range(len(pk_cols)):
+        eqs = [f"`{pk_cols[j]}` = {_sql_lit(last_vals[j])}" for j in range(i)]
+        eqs.append(f"`{pk_cols[i]}` > {_sql_lit(last_vals[i])}")
+        ors.append("(" + " AND ".join(eqs) + ")")
+    return "(" + " OR ".join(ors) + ")"
+
+
+def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
+                   base_cond: str, chunk_size: int = KEYSET_CHUNK):
+    """Yield rows in PK order using keyset pagination, so the DB never has to
+    filesort the whole result set to disk. `fetch(sql)` runs one page and
+    returns a list of row tuples. `base_cond` is a bare WHERE condition
+    (no WHERE keyword) or empty string.
+    """
+    pk_indices = [all_cols.index(c) for c in pk_cols]
+    order_by = ", ".join(f"`{c}`" for c in pk_cols)
+    col_list = ", ".join(f"`{c}`" for c in all_cols)
+    last = None
+    while True:
+        conds = []
+        if base_cond:
+            conds.append(base_cond)
+        if last is not None:
+            conds.append(_keyset_cond(pk_cols, last))
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        sql = (f"SELECT {col_list} FROM `{table}` {where} "
+               f"ORDER BY {order_by} LIMIT {chunk_size}")
+        rows = fetch(sql)
+        if not rows:
+            break
+        for r in rows:
+            yield r
+        if len(rows) < chunk_size:
+            break
+        last = tuple(rows[-1][i] for i in pk_indices)
+
+
 def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                      src, where: str, src_rows_est: int,
                      window_label: str | None = None) -> dict:
     """Two-pointer merge on filtered rows. Returns result dict.
     Reuses the caller's src connection — MySQL 4 only allows 1 concurrent
     connection per user, so opening a second one blocks indefinitely.
-    Opens a fresh tgt connection for SSCursor.
+    Opens a fresh tgt connection for the target side.
+    Both sides are read with keyset pagination (ORDER BY pk LIMIT N per page)
+    so neither DB filesorts the whole set to its tmpdir.
     Also appends all discrepancies to a dynamic local CSV report.
     """
     import csv
@@ -612,22 +673,29 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
     except Exception as e:
         print(f"Warning: Failed to create full compare file: {e}", file=sys.stderr)
 
-    order_by = ", ".join(f"`{c}`" for c in pk_cols)
-    col_list  = ", ".join(f"`{c}`" for c in all_cols)
-    sql       = f"SELECT {col_list} FROM `{table}` {where} ORDER BY {order_by}"
+    # Bare condition (strip the WHERE keyword) so keyset can AND it with the
+    # seek boundary on each page.
+    base_cond = where[6:].strip() if where[:5].upper() == "WHERE" else where
 
     tgt_conn = _connect_target(DATABASE)
-    tc_ss    = None
 
     try:
         setup = tgt_conn.cursor()
         setup.execute("SET SESSION net_write_timeout = 3600")
         setup.execute("SET SESSION net_read_timeout  = 3600")
+        setup.execute("SET SESSION sort_buffer_size = 268435456")
         setup.close()
 
-        tc_ss   = tgt_conn.cursor(MySQLdb.cursors.SSCursor)
-        src_gen = src.query_stream(sql)
-        tc_ss.execute(sql)
+        def _tgt_fetch(sql):
+            cur = tgt_conn.cursor()
+            try:
+                cur.execute(sql)
+                return cur.fetchall()
+            finally:
+                cur.close()
+
+        src_gen = _keyset_stream(src.query, table, pk_cols, all_cols, base_cond)
+        tgt_gen = _keyset_stream(_tgt_fetch, table, pk_cols, all_cols, base_cond)
 
         pk_n = len(pk_cols)
         col_idx = {col: i for i, col in enumerate(all_cols)}
@@ -656,7 +724,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
         last_emit = 0
 
         s_row = next(src_gen, None)
-        t_row = tc_ss.fetchone()
+        t_row = next(tgt_gen, None)
 
         while s_row is not None or t_row is not None:
             if s_row is not None and t_row is not None:
@@ -715,7 +783,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                                 "diffs": [False] * len(all_cols),
                             }, ensure_ascii=False) + "\n")
                     s_row = next(src_gen, None)
-                    t_row = tc_ss.fetchone()
+                    t_row = next(tgt_gen, None)
                 elif s_key < t_key:
                     total_src += 1; missing += 1
                     pk_dict = {pk_cols[j]: s_pk[j] for j in range(pk_n)}
@@ -763,7 +831,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                                 "match": False,
                             })
                         samples.append({"type": "extra", "status": "extra", "pk": pk_dict, "fields": fields})
-                    t_row = tc_ss.fetchone()
+                    t_row = next(tgt_gen, None)
             elif s_row is not None:
                 total_src += 1; missing += 1
                 s_pk_val = pk_of(s_row)
@@ -818,7 +886,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                         "pk": pk_dict,
                         "fields": fields,
                     })
-                t_row = tc_ss.fetchone()
+                t_row = next(tgt_gen, None)
 
             matched = total_src + total_tgt - (missing + extra)
             if matched - last_emit >= 1_000_000:
@@ -853,9 +921,6 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
         if ndjson_file:
             try: ndjson_file.close()
             except: pass
-        if tc_ss:
-            try: tc_ss.close()
-            except Exception: pass
         try: tgt_conn.close()
         except Exception: pass
 
