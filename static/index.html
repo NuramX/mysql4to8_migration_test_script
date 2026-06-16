@@ -1862,11 +1862,13 @@
           Auto Random Sample
         </label>
         <span style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px"
-          title="ตรวจเฉพาะข้อมูลช่วงปีนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">
-          Data Year:
+          title="ตรวจเฉพาะข้อมูลช่วงปี/เดือนนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">
+          Data Range:
           <select id="at-year-from" class="db-select"></select>
+          <select id="at-month-from" class="db-select"></select>
           –
           <select id="at-year-to" class="db-select"></select>
+          <select id="at-month-to" class="db-select"></select>
         </span>
         <button id="at-run-btn" onclick="runAllTables()">
           <div class="spinner"></div>
@@ -2099,15 +2101,19 @@
     // Per-DB result store — saves/restores atResults+atCounts when switching databases
     const atDbStore = {};  // db -> { results: {...}, counts: {...} }
 
-    // Year-range window for data checks. Empty inputs → null → backend falls back
+    // Year/month-range window for data checks. Empty inputs → null → backend falls back
     // to config default (last data_window_years calendar years).
     function atYearWindow() {
       let yf = parseInt(document.getElementById('at-year-from')?.value, 10);
       let yt = parseInt(document.getElementById('at-year-to')?.value, 10);
-      if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) [yf, yt] = [yt, yf];  // swap reversed range
+      let mf = parseInt(document.getElementById('at-month-from')?.value, 10);
+      let mt = parseInt(document.getElementById('at-month-to')?.value, 10);
+      if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) { [yf, yt] = [yt, yf]; [mf, mt] = [mt, mf]; }
       return {
-        year_from: Number.isFinite(yf) ? yf : null,
-        year_to: Number.isFinite(yt) ? yt : null,
+        year_from:  Number.isFinite(yf) ? yf : null,
+        year_to:    Number.isFinite(yt) ? yt : null,
+        month_from: Number.isFinite(mf) ? mf : null,
+        month_to:   Number.isFinite(mt) ? mt : null,
       };
     }
 
@@ -2397,7 +2403,7 @@
     // Cache key includes the year window — changing years must refetch, not reuse
     function atTsCacheKey(table) {
       const w = atYearWindow();
-      return `${table}|${w.year_from ?? ''}|${w.year_to ?? ''}`;
+      return `${table}|${w.year_from ?? ''}|${w.year_to ?? ''}|${w.month_from ?? ''}|${w.month_to ?? ''}`;
     }
 
     async function atLoadTsInfo(table, db, pkCols) {
@@ -3675,11 +3681,12 @@
       atReplayIfAvailable();
     });
 
-    // Populate year dropdowns: first option = config default ("" value → backend
-    // applies the last-N-years default), then current year down to 2000.
+    // Populate year/month dropdowns.
     async function atInitYearWindow() {
-      const fromEl = document.getElementById('at-year-from');
-      const toEl = document.getElementById('at-year-to');
+      const fromEl  = document.getElementById('at-year-from');
+      const toEl    = document.getElementById('at-year-to');
+      const mFromEl = document.getElementById('at-month-from');
+      const mToEl   = document.getElementById('at-month-to');
       if (!fromEl || !toEl) return;
       let defLabelFrom = 'Default';
       const now = new Date().getFullYear();
@@ -3687,13 +3694,18 @@
         const cfg = await fetch('/api/config').then(r => r.json());
         const n = parseInt((cfg.tuning || {}).data_window_years, 10) || 0;
         defLabelFrom = n > 0 ? `Default (${now - n})` : 'Default (all)';
-      } catch (e) { /* non-fatal — keep generic label */ }
+      } catch (e) { /* non-fatal */ }
       const years = [];
       for (let y = now; y >= 2000; y--) years.push(y);
       fromEl.innerHTML = `<option value="">${defLabelFrom}</option>` +
         years.map(y => `<option value="${y}">${y}</option>`).join('');
       toEl.innerHTML = `<option value="">Default (${now})</option>` +
         years.map(y => `<option value="${y}">${y}</option>`).join('');
+      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const monthOpts = `<option value="">-</option>` +
+        MONTHS.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+      if (mFromEl) mFromEl.innerHTML = monthOpts;
+      if (mToEl)   mToEl.innerHTML   = monthOpts;
     }
 
     async function atReplayIfAvailable() {

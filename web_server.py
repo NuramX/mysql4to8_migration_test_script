@@ -127,6 +127,68 @@ def _reader_thread(proc: subprocess.Popen):
     _run_done.set()
 
 
+def _get_data_window(year_from, year_to, month_from, month_to, data_window_years=0):
+    import datetime as _dt
+    try:
+        yfrom = int(year_from) if year_from is not None else None
+    except (ValueError, TypeError):
+        yfrom = None
+    try:
+        yto = int(year_to) if year_to is not None else None
+    except (ValueError, TypeError):
+        yto = None
+    try:
+        mfrom = int(month_from) if month_from is not None else None
+        if mfrom is not None and not (1 <= mfrom <= 12):
+            mfrom = None
+    except (ValueError, TypeError):
+        mfrom = None
+    try:
+        mto = int(month_to) if month_to is not None else None
+        if mto is not None and not (1 <= mto <= 12):
+            mto = None
+    except (ValueError, TypeError):
+        mto = None
+
+    base_year = _dt.date.today().year
+    if yfrom is not None:
+        _yfrom = yfrom
+    elif data_window_years > 0:
+        _yfrom = base_year - data_window_years
+    else:
+        _yfrom = None
+
+    if _yfrom is not None:
+        win_start = f"{_yfrom}-{mfrom if mfrom else 1:02d}-01"
+    else:
+        win_start = None
+
+    if yto is not None:
+        _mto = mto if mto else 12
+        if _mto == 12:
+            win_end = f"{yto + 1}-01-01"
+        else:
+            win_end = f"{yto}-{_mto + 1:02d}-01"
+    else:
+        win_end = None
+
+    return win_start, win_end
+
+
+def _get_window_label(win_start, win_end):
+    if win_start and win_end:
+        import datetime as _dt
+        try:
+            _end_excl = _dt.date.fromisoformat(win_end)
+            _last_day = (_end_excl - _dt.timedelta(days=1)).isoformat()
+            return f"{win_start} → {_last_day}"
+        except Exception:
+            pass
+    if win_start:
+        return f"≥{win_start}"
+    return None
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
@@ -163,6 +225,8 @@ def at_run_validation():
     sync_tables = data.get("sync_tables", [])   # list of table names for full sync pass
     year_from  = data.get("year_from")          # int or None → config default window
     year_to    = data.get("year_to")
+    month_from = data.get("month_from")         # int 1-12 or None
+    month_to   = data.get("month_to")
 
     with _process_lock:
         if _process is not None and _process.poll() is None:
@@ -181,6 +245,10 @@ def at_run_validation():
             cmd += ["--year-from", str(int(year_from))]
         if year_to:
             cmd += ["--year-to", str(int(year_to))]
+        if month_from:
+            cmd += ["--month-from", str(int(month_from))]
+        if month_to:
+            cmd += ["--month-to", str(int(month_to))]
         _process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -507,16 +575,13 @@ def random_compare():
         # year_to (inclusive years) override the config default of the last
         # data_window_years calendar years. Uses first date-typed PK column.
         win_years = int((cfg.get("tuning") or {}).get("data_window_years", 0))
-        year_from = data.get("year_from")
-        year_to = data.get("year_to")
-        import datetime as _dt
-        if year_from:
-            win_start = f"{int(year_from)}-01-01"
-        elif win_years > 0:
-            win_start = f"{_dt.date.today().year - win_years}-01-01"
-        else:
-            win_start = None
-        win_end = f"{int(year_to) + 1}-01-01" if year_to else None  # exclusive
+        win_start, win_end = _get_data_window(
+            data.get("year_from"),
+            data.get("year_to"),
+            data.get("month_from"),
+            data.get("month_to"),
+            win_years
+        )
 
         win_cond = ""
         cutoff = None
@@ -531,8 +596,7 @@ def random_compare():
                     if win_end:
                         parts.append(f"`{c}` < '{win_end}'")
                     win_cond = " AND ".join(parts)
-                    cutoff = (f"{win_start or ''}..{year_to or ''}".strip(".")
-                              if win_end else win_start)
+                    cutoff = _get_window_label(win_start, win_end)
                     break
 
         # Use intersection of columns (in target order)
@@ -824,14 +888,13 @@ def table_timestamp_info():
 
     # Year window: explicit request range, else config default (last N years)
     win_years = int((cfg.get("tuning") or {}).get("data_window_years", 0))
-    import datetime as _dt
-    if year_from:
-        win_start = f"{int(year_from)}-01-01"
-    elif win_years > 0:
-        win_start = f"{_dt.date.today().year - win_years}-01-01"
-    else:
-        win_start = None
-    win_end = f"{int(year_to) + 1}-01-01" if year_to else None  # exclusive
+    win_start, win_end = _get_data_window(
+        data.get("year_from"),
+        data.get("year_to"),
+        data.get("month_from"),
+        data.get("month_to"),
+        win_years
+    )
 
     def _win_where(col):
         parts = []
@@ -881,8 +944,8 @@ def table_timestamp_info():
 
         # window label only when a date-typed PK column exists to filter on —
         # the COUNT(*) fallback path has no such column and counts the full table
-        result["window"] = (f"{win_start or ''}..{f'{int(year_to)}-12-31' if year_to else ''}"
-                            .strip(".") if (ts_col and (win_start or win_end)) else None)
+        result["window"] = (_get_window_label(win_start, win_end)
+                            if (ts_col and (win_start or win_end)) else None)
 
         if ts_col:
             # MIN/MAX via ORDER BY + LIMIT 1 instead of MIN()/MAX() with a

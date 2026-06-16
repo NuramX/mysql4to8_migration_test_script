@@ -86,25 +86,64 @@ def _cli_int(flag: str) -> int | None:
                 pass
     return None
 
-_year_from = _cli_int("--year-from")
-_year_to   = _cli_int("--year-to")
+_year_from  = _cli_int("--year-from")
+_year_to    = _cli_int("--year-to")
+_month_from = _cli_int("--month-from")
+_month_to   = _cli_int("--month-to")
+
+# Validate month range (1-12)
+for _mflag, _mval in (("--month-from", _month_from), ("--month-to", _month_to)):
+    if _mval is not None and not (1 <= _mval <= 12):
+        print(f"Warning: {_mflag} {_mval} out of range (1-12), ignoring", file=sys.stderr)
+        if _mflag == "--month-from":
+            _month_from = None
+        else:
+            _month_to = None
+
+def _month_start(year: int, month: int) -> str:
+    return f"{year}-{month:02d}-01"
+
+def _month_end_exclusive(year: int, month: int) -> str:
+    """First day of the month AFTER month (exclusive upper bound)."""
+    if month == 12:
+        return f"{year + 1}-01-01"
+    return f"{year}-{month + 1:02d}-01"
+
+_base_year = _datetime.date.today().year
 
 if _year_from is not None:
-    WINDOW_START = f"{_year_from}-01-01"
+    _yfrom = _year_from
 elif DATA_WINDOW_YEARS > 0:
-    WINDOW_START = f"{_datetime.date.today().year - DATA_WINDOW_YEARS}-01-01"
+    _yfrom = _base_year - DATA_WINDOW_YEARS
+else:
+    _yfrom = None
+
+if _yfrom is not None:
+    WINDOW_START = _month_start(_yfrom, _month_from if _month_from else 1)
 else:
     WINDOW_START = None
-# end bound is exclusive: year_to=2025 → rows < '2026-01-01'
-WINDOW_END = f"{_year_to + 1}-01-01" if _year_to is not None else None
+
+if _year_to is not None:
+    WINDOW_END = _month_end_exclusive(_year_to, _month_to if _month_to else 12)
+else:
+    WINDOW_END = None
 
 def _window_label() -> str:
-    """Human-readable range for summaries, e.g. '2024-01-01 → 2025-12-31'."""
+    """Human-readable range for summaries, e.g. '2024-03-01 → 2024-06-30'."""
     if WINDOW_START and WINDOW_END:
-        return f"{WINDOW_START} → {_year_to}-12-31"
+        # compute last day of window for display (WINDOW_END is exclusive)
+        import datetime as _dt
+        _end_excl = _dt.date.fromisoformat(WINDOW_END)
+        _last_day = (_end_excl - _dt.timedelta(days=1)).isoformat()
+        return f"{WINDOW_START} → {_last_day}"
     if WINDOW_START:
         return f"≥{WINDOW_START}"
-    return f"≤{_year_to}-12-31"
+    if WINDOW_END:
+        import datetime as _dt
+        _end_excl = _dt.date.fromisoformat(WINDOW_END)
+        _last_day = (_end_excl - _dt.timedelta(days=1)).isoformat()
+        return f"≤{_last_day}"
+    return ""
 
 _TS_TYPE_RE = re.compile(r"timestamp|datetime|^date")
 
