@@ -324,8 +324,41 @@
       flex-wrap: wrap;
     }
 
-    #at-sync-btn {
+    #at-quick-btn {
+      display: none;
       margin-left: auto;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #1a3a2a, #2d6b45);
+      border: 1px solid #4dcc8a;
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 6px 16px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    #at-quick-btn:hover:not(:disabled) {
+      background: linear-gradient(135deg, #2d6b45, #4dcc8a);
+      transform: translateY(-1px);
+    }
+    #at-quick-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    #at-quick-btn .spinner {
+      display: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    #at-quick-btn.running .spinner { display: inline-block; }
+    #at-quick-btn.running .quick-btn-icon { display: none; }
+
+    #at-sync-btn {
       display: none;
       align-items: center;
       gap: 8px;
@@ -1905,6 +1938,11 @@
         <button class="at-sel-link" onclick="atSelectAll()">Select All Visible</button>
         <button class="at-sel-link" onclick="atSelectNone()">Deselect All</button>
       </div>
+      <button id="at-quick-btn" onclick="runQuickSelected()">
+        <div class="spinner"></div>
+        <span class="quick-btn-icon">🔍</span>
+        <span id="at-quick-btn-text">Quick Scan Selected (0)</span>
+      </button>
       <button id="at-sync-btn" onclick="runSyncSelected()">
         <div class="spinner"></div>
         <span class="sync-btn-icon">⚡</span>
@@ -2930,11 +2968,13 @@
     function atUpdateSelBar() {
       const n = atSelected.size;
       const bar = document.getElementById('at-sel-bar');
-      const btn = document.getElementById('at-sync-btn');
       bar.style.display = Object.keys(atResults).length ? 'flex' : 'none';
       document.getElementById('at-sel-count').textContent = `${n} selected`;
-      btn.style.display = n > 0 ? 'flex' : 'none';
+      const show = n > 0 ? 'flex' : 'none';
+      document.getElementById('at-sync-btn').style.display = show;
       document.getElementById('at-sync-btn-text').textContent = `Run Full Sync on Selected (${n})`;
+      document.getElementById('at-quick-btn').style.display = show;
+      document.getElementById('at-quick-btn-text').textContent = `Quick Scan Selected (${n})`;
     }
 
     function atSetFilter(f) {
@@ -3205,6 +3245,84 @@
     function _syncBeforeUnload() {
       navigator.sendBeacon('/api/all-tables/stop');
       window.removeEventListener('beforeunload', _syncBeforeUnload);
+    }
+
+    async function runQuickSelected() {
+      if (!atSelected.size) return;
+      const btn = document.getElementById('at-quick-btn');
+      btn.disabled = true;
+      btn.classList.add('running');
+      document.getElementById('at-run-time').textContent = `Running quick scan on ${atSelected.size} table(s)…`;
+
+      try { await fetch('/api/all-tables/stop', { method: 'POST' }); } catch (e) { /* ignore */ }
+
+      // Snapshot existing results — server only returns selected tables; restore rest after.
+      const snapshot = {};
+      Object.entries(atResults).forEach(([k, v]) => {
+        snapshot[k] = { ...v, checks: { ...v.checks }, checks_data: { ...v.checks_data } };
+      });
+
+      try {
+        sessionStorage.setItem('_quickSnapshot', JSON.stringify({
+          snapshot,
+          syncTables: [...atSelected],
+          db: activeDatabase,
+        }));
+      } catch (e) { /* non-fatal */ }
+
+      const resp = await fetch('/api/all-tables/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ db: activeDatabase, skip_sync: true, tables: [...atSelected], ...atYearWindow() })
+      });
+      if (!resp.ok) {
+        alert('Failed to start quick scan');
+        btn.disabled = false; btn.classList.remove('running');
+        return;
+      }
+
+      if (atEs) atEs.close();
+      atEs = new EventSource('/api/all-tables/stream');
+      atEs.onmessage = e => {
+        try {
+          const ev = JSON.parse(e.data);
+          if (ev.type === 'done') {
+            btn.disabled = false; btn.classList.remove('running');
+            document.getElementById('at-quick-btn-text').textContent = `Quick Scan Selected (${atSelected.size})`;
+            document.getElementById('at-run-time').textContent = 'Quick scan completed';
+            atEs.close(); atEs = null;
+            sessionStorage.removeItem('_quickSnapshot');
+            window.removeEventListener('beforeunload', _quickBeforeUnload);
+            // Restore non-selected tables
+            Object.entries(snapshot).forEach(([k, v]) => {
+              if (!atSelected.has(k) && !atResults[k]) atResults[k] = v;
+            });
+            // Merge fresh results for selected tables
+            atSelected.forEach(k => {
+              if (snapshot[k] && atResults[k]) {
+                atResults[k] = {
+                  ...snapshot[k],
+                  ...atResults[k],
+                  checks: { ...snapshot[k].checks, ...atResults[k].checks },
+                  checks_data: { ...snapshot[k].checks_data, ...atResults[k].checks_data },
+                };
+              }
+            });
+            atSaveDbState();
+            atRenderTable();
+          } else {
+            atHandleEvent(ev);
+          }
+        } catch (ex) { console.warn('quick SSE parse error', ex); }
+      };
+      atEs.onerror = () => { atEs.close(); atEs = null; };
+
+      window.addEventListener('beforeunload', _quickBeforeUnload);
+    }
+
+    function _quickBeforeUnload() {
+      navigator.sendBeacon('/api/all-tables/stop');
+      window.removeEventListener('beforeunload', _quickBeforeUnload);
     }
 
     async function runAllTables() {
