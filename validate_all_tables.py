@@ -110,7 +110,8 @@ def _month_end_exclusive(year: int, month: int) -> str:
         return f"{year + 1}-01-01"
     return f"{year}-{month + 1:02d}-01"
 
-_base_year = _datetime.date.today().year
+_today      = _datetime.date.today()
+_base_year  = _today.year
 
 if _year_from is not None:
     _yfrom = _year_from
@@ -124,10 +125,15 @@ if _yfrom is not None:
 else:
     WINDOW_START = None
 
+# Upper bound: always cap at today (exclusive) so today's incomplete data is
+# never included. If user specified a past year/month the calculated end is
+# already before today and the min() leaves it unchanged.
 if _year_to is not None:
-    WINDOW_END = _month_end_exclusive(_year_to, _month_to if _month_to else 12)
+    _calc_end = _month_end_exclusive(_year_to, _month_to if _month_to else 12)
+    WINDOW_END = min(_calc_end, _today.isoformat())
 else:
-    WINDOW_END = None
+    # No explicit upper bound → default cap is today (exclude today's data).
+    WINDOW_END = _today.isoformat()
 
 def _window_label() -> str:
     """Human-readable range for summaries, e.g. '2024-03-01 → 2024-06-30'."""
