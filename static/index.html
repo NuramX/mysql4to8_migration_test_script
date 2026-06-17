@@ -2110,10 +2110,10 @@
       let mt = parseInt(document.getElementById('at-month-to')?.value, 10);
       if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) { [yf, yt] = [yt, yf]; [mf, mt] = [mt, mf]; }
       return {
-        year_from:  Number.isFinite(yf) ? yf : null,
-        year_to:    Number.isFinite(yt) ? yt : null,
-        month_from: Number.isFinite(mf) ? mf : null,
-        month_to:   Number.isFinite(mt) ? mt : null,
+        year_from:       Number.isFinite(yf) ? yf : null,
+        year_to:         Number.isFinite(yt) ? yt : null,
+        month_from:      Number.isFinite(mf) ? mf : null,
+        month_to:        Number.isFinite(mt) ? mt : null,
       };
     }
 

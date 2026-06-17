@@ -225,8 +225,8 @@ def at_run_validation():
     sync_tables = data.get("sync_tables", [])   # list of table names for full sync pass
     year_from  = data.get("year_from")          # int or None → config default window
     year_to    = data.get("year_to")
-    month_from = data.get("month_from")         # int 1-12 or None
-    month_to   = data.get("month_to")
+    month_from      = data.get("month_from")         # int 1-12 or None
+    month_to        = data.get("month_to")
 
     with _process_lock:
         if _process is not None and _process.poll() is None:

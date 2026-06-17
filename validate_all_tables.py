@@ -32,7 +32,8 @@ _tuning     = _cfg.get("tuning", {})
 import os
 
 JSON_MODE  = "--json"       in sys.argv
-SKIP_SYNC  = "--skip-sync"  in sys.argv
+SKIP_SYNC       = "--skip-sync"       in sys.argv
+
 
 DATABASE = "prs"
 if "--db" in sys.argv:
@@ -598,25 +599,6 @@ def check_duplicate_pk(table: str, pk_cols: list[str], src, tgt, src_rows: int =
 
 
 # ─── CHECK: Full Field Sync ───────────────────────────────────────────────────
-HASH_CHUNKS = int(_tuning.get("hash_chunks", 100))
-
-
-def _build_hash_sql(table: str, pk_cols: list[str], all_cols: list[str], chunks: int,
-                    cond: str = "") -> str:
-    """MD5-based hash query compatible with MySQL 4.0+.
-    Returns (chunk_id, row_count, value_hash) per bucket.
-    Uses CONV(SUBSTRING(MD5(...),1,8),16,10) to get a numeric hash from first 8 hex chars of MD5.
-    GROUP BY repeats the full expression (MySQL 4.0 does not support alias in GROUP BY).
-    """
-    pk_cs   = "CONCAT_WS('|', " + ", ".join(f"IFNULL(`{c}`,'')" for c in pk_cols)  + ")"
-    col_cs  = "CONCAT_WS('|', " + ", ".join(f"IFNULL(`{c}`,'')" for c in all_cols) + ")"
-    chunk_e = f"MOD(CONV(SUBSTRING(MD5({pk_cs}),1,8),16,10),{chunks})"
-    val_e   = f"CONV(SUBSTRING(MD5({col_cs}),1,8),16,10)"
-    where = f"WHERE {cond} " if cond else ""
-    return (
-        f"SELECT {chunk_e} AS c, COUNT(*) AS cnt, SUM({val_e}) AS h "
-        f"FROM `{table}` {where}GROUP BY {chunk_e} ORDER BY {chunk_e}"
-    )
 
 
 # Keyset (seek) pagination chunk size. Each page is fetched with
@@ -977,60 +959,8 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
 
     try:
         window   = _window_cond(ts_col)
-        chunks   = max(10, min(HASH_CHUNKS, (src_rows_est or 0) // 10_000))
-        hash_sql = _build_hash_sql(table, pk_cols, all_cols, chunks, cond=window)
-        pk_cs    = "CONCAT_WS('|', " + ", ".join(f"IFNULL(`{c}`,'')" for c in pk_cols) + ")"
-        chunk_e  = f"MOD(CONV(SUBSTRING(MD5({pk_cs}),1,8),16,10),{chunks})"
         win_note = f", window {_window_label()}" if window else ""
-
-        # ── Phase 1: server-side hash comparison ──────────────────────────────
-        # normalize hash values: MySQL 4 returns string, MySQL 8 returns float — both → int
-        def _to_int(v):
-            try:
-                return int(float(v)) if v is not None else 0
-            except (ValueError, TypeError):
-                return 0
-
-        src_h_raw = src.query(hash_sql)
-        src_h = {int(r[0]): (int(r[1]), _to_int(r[2])) for r in src_h_raw}
-
-        tgt_h_conn = _connect_target(DATABASE)
-        try:
-            tc = tgt_h_conn.cursor()
-            tc.execute(hash_sql)
-            tgt_h = {int(r[0]): (int(r[1]), _to_int(r[2])) for r in tc.fetchall()}
-            tc.close()
-        finally:
-            tgt_h_conn.close()
-
-        bad = [c for c in range(chunks) if src_h.get(c) != tgt_h.get(c)]
-
-        if not bad:
-            total = sum(v[0] for v in src_h.values())
-            # Clean up any old mismatches CSV report if it passes
-            import os
-            reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
-            os.makedirs(reports_dir, exist_ok=True)
-            csv_path = os.path.join(reports_dir, f"{table}_mismatches.csv")
-            if os.path.exists(csv_path):
-                try: os.remove(csv_path)
-                except: pass
-
-            # Hash matched — fall through to full row-by-row so ndjson is
-            # populated and Full Comparison View has data to display.
-            # For tables in ts_field_config the year window already limits scope.
-            bad = list(range(chunks))
-
-        # ── Phase 2: stream only mismatched chunks ─────────────────────────────
-        pct_bad = len(bad) / chunks * 100
-        conds = []
-        if len(bad) < chunks:
-            chunk_in = ",".join(map(str, bad))
-            conds.append(f"{chunk_e} IN ({chunk_in})")
-        # else: everything mismatches — stream all (within window)
-        if window:
-            conds.append(window)
-        where = f"WHERE {' AND '.join(conds)}" if conds else ""
+        where    = f"WHERE {window}" if window else ""
 
         result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est,
                                  window_label=_window_label() if window else None)
@@ -1045,8 +975,8 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
             "summary": (
                 f"src={result['src_rows']:,}  tgt={result['tgt_rows']:,}  "
                 f"matched={matched:,}  mismatch={result['mismatches']:,}  "
-                f"missing={result['missing_in_tgt']:,}  extra={result['extra_in_tgt']:,}  "
-                f"({len(bad)}/{chunks} chunks scanned, {pct_bad:.0f}% of table{win_note})"
+                f"missing={result['missing_in_tgt']:,}  extra={result['extra_in_tgt']:,}"
+                f"{win_note}"
             ),
             **result, "method": "stream",
             "window": _window_label() if window else None,
