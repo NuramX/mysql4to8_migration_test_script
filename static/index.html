@@ -2237,11 +2237,10 @@
 
       tables.forEach(t => {
         if (!atResults[t]) atResults[t] = { checks: {}, checks_data: {}, src_rows: null, tgt_rows: null };
-        atSelected.add(t);
       });
       document.getElementById('at-table-wrap').style.display = '';
       document.getElementById('at-placeholder').style.display = 'none';
-      document.getElementById('at-chk-all').checked = true;
+      document.getElementById('at-chk-all').checked = false;
       atRenderTable();
       atUpdatePills();
       atUpdateSelBar();
