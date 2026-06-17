@@ -163,14 +163,16 @@ def _get_data_window(year_from, year_to, month_from, month_to, data_window_years
     else:
         win_start = None
 
+    today_str = _dt.date.today().isoformat()
     if yto is not None:
         _mto = mto if mto else 12
         if _mto == 12:
-            win_end = f"{yto + 1}-01-01"
+            calc_end = f"{yto + 1}-01-01"
         else:
-            win_end = f"{yto}-{_mto + 1:02d}-01"
+            calc_end = f"{yto}-{_mto + 1:02d}-01"
+        win_end = min(calc_end, today_str)
     else:
-        win_end = None
+        win_end = today_str
 
     return win_start, win_end
 
