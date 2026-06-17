@@ -224,7 +224,8 @@ def at_run_validation():
     db         = data.get("db", "prs")
     skip_sync  = data.get("skip_sync", True)
     sync_limit = data.get("sync_limit", 0)
-    sync_tables = data.get("sync_tables", [])   # list of table names for full sync pass
+    sync_tables   = data.get("sync_tables", [])    # list of table names for full sync pass
+    tables_filter = data.get("tables", [])         # scan only these tables (all checks)
     year_from  = data.get("year_from")          # int or None → config default window
     year_to    = data.get("year_to")
     month_from      = data.get("month_from")         # int 1-12 or None
@@ -251,6 +252,8 @@ def at_run_validation():
             cmd += ["--month-from", str(int(month_from))]
         if month_to:
             cmd += ["--month-to", str(int(month_to))]
+        if tables_filter:
+            cmd += ["--tables", ",".join(tables_filter)]
         _process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -260,6 +263,27 @@ def at_run_validation():
     t = threading.Thread(target=_reader_thread, args=(_process,), daemon=True)
     t.start()
     return jsonify({"started": True, "db": db})
+
+
+@app.route("/api/list-tables", methods=["POST"])
+def list_tables():
+    """Return all table names from source DB — no comparison, just names."""
+    data = request.json if request.is_json else {}
+    db   = data.get("db", "prs")
+    try:
+        from mysql40 import MySQL40Connection
+        cfg     = _load_config()
+        src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
+        src_conn = MySQL40Connection(
+            host=src_cfg["host"], port=int(src_cfg["port"]),
+            user=src_cfg["user"], password=src_cfg["password"],
+            database=db, timeout=30, charset="tis620",
+        )
+        rows = src_conn.query("SHOW TABLES")
+        src_conn.close()
+        return jsonify({"tables": [r[0] for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/all-tables/stop", methods=["POST"])

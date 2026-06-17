@@ -2187,12 +2187,64 @@
 
     function onDatabaseChange() {
       const selector = document.getElementById('db-selector');
-      atSaveDbState();                       // save current DB's results
+      atSaveDbState();
       activeDatabase = selector.value;
       atUpdateDBPlaceholderText(activeDatabase);
-      atRestoreDbState(activeDatabase);      // restore new DB's results (or empty)
+      atRestoreDbState(activeDatabase);
       atUpdatePills();
       atRenderTable();
+      atLoadTableList();
+    }
+
+    const TABLE_LIST_TTL = 5 * 60 * 1000; // 5 min
+
+    function atGetCachedTableList(db) {
+      try {
+        const raw = localStorage.getItem(`tableList:${db}`);
+        if (!raw) return null;
+        const { tables, ts } = JSON.parse(raw);
+        if (Date.now() - ts > TABLE_LIST_TTL) return null;
+        return tables;
+      } catch (e) { return null; }
+    }
+
+    function atSetCachedTableList(db, tables) {
+      try {
+        localStorage.setItem(`tableList:${db}`, JSON.stringify({ tables, ts: Date.now() }));
+      } catch (e) { /* storage full — non-fatal */ }
+    }
+
+    async function atLoadTableList() {
+      if (!activeDatabase) return;
+      // Already have results — don't overwrite with empty skeleton
+      if (Object.keys(atResults).length > 0) return;
+
+      let tables = atGetCachedTableList(activeDatabase);
+      if (!tables) {
+        try {
+          const res = await fetch('/api/list-tables', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ db: activeDatabase }),
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data.tables || !data.tables.length) return;
+          tables = data.tables;
+          atSetCachedTableList(activeDatabase, tables);
+        } catch (e) { return; }
+      }
+
+      tables.forEach(t => {
+        if (!atResults[t]) atResults[t] = { checks: {}, checks_data: {}, src_rows: null, tgt_rows: null };
+        atSelected.add(t);
+      });
+      document.getElementById('at-table-wrap').style.display = '';
+      document.getElementById('at-placeholder').style.display = 'none';
+      document.getElementById('at-chk-all').checked = true;
+      atRenderTable();
+      atUpdatePills();
+      atUpdateSelBar();
     }
 
     async function atLoadConfig() {
@@ -3102,7 +3154,7 @@
       const resp = await fetch('/api/all-tables/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ db: activeDatabase, skip_sync: false, sync_tables: [...atSelected], ...atYearWindow() })
+        body: JSON.stringify({ db: activeDatabase, skip_sync: false, tables: [...atSelected], ...atYearWindow() })
       });
       if (!resp.ok) {
         alert('Failed to start sync');
@@ -3179,10 +3231,16 @@
       document.getElementById('at-placeholder').style.display = '';
 
       const skipSync = document.getElementById('at-skip-sync').checked;
+      const selectedTables = atSelected.size > 0 ? [...atSelected] : null;
       const resp = await fetch('/api/all-tables/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ db: activeDatabase, skip_sync: skipSync, ...atYearWindow() })
+        body: JSON.stringify({
+          db: activeDatabase,
+          skip_sync: skipSync,
+          ...(selectedTables ? { tables: selectedTables } : {}),
+          ...atYearWindow()
+        })
       });
       if (!resp.ok) { alert('Failed to start'); btn.disabled = false; btn.classList.remove('running'); return; }
 
@@ -3679,6 +3737,7 @@
       await atInitSettings();
       atInitYearWindow();
       atReplayIfAvailable();
+      atLoadTableList();
     });
 
     // Populate year/month dropdowns.
