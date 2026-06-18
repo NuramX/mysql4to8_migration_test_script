@@ -378,6 +378,7 @@ def _load_src_schema_cache(src, tables: list[str]) -> dict:
             col_rows, idx_rows = [], []
         pk = [(int(r[3]), r[4]) for r in idx_rows if r[2] == "PRIMARY"]
         cache[table] = {
+            "table":    table,
             "columns":  col_rows,
             "indexes":  idx_rows,
             "pk_cols":  [c for _, c in sorted(pk)],
