@@ -1696,6 +1696,9 @@ def _sc_worker(sql: str, table: str, db: str):
 
     src_conn = tgt_conn = ndjson_f = None
     try:
+        # Preserve user LIMIT before stripping
+        _lm = _re.search(r'\bLIMIT\s+(\d+)\s*$', sql, flags=_re.IGNORECASE)
+        user_limit = int(_lm.group(1)) if _lm else None
         strip_sql = _strip_order_limit(sql)
 
         # ── Discover columns & PK ─────────────────────────────────────────────
@@ -1747,7 +1750,8 @@ def _sc_worker(sql: str, table: str, db: str):
 
         # ── Build streaming SQL ───────────────────────────────────────────────
         pk_order = ", ".join(f"`{c}`" for c in pk_cols)
-        stream_sql = f"{strip_sql} ORDER BY {pk_order}"
+        limit_clause = f" LIMIT {user_limit}" if user_limit else ""
+        stream_sql = f"{strip_sql} ORDER BY {pk_order}{limit_clause}"
 
         _sc_emit({"type": "sc_start", "pk_cols": pk_cols, "columns": common_cols,
                   "db": db, "table": table, "sql": stream_sql})
