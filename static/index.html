@@ -4422,10 +4422,11 @@
     }
 
     // ─── SQL Compare ────────────────────────────────────────────────────────────
+    const SC_REPORT = '_sql_compare';
     const scState = {
       mode: 'idle',   // 'idle' | 'streaming' | 'done'
       streamMeta: null, streamProg: null,
-      pagedFilter: 'all', pagedPage: 0, pagedPageSize: 50, pagedData: null,
+      pagedFilter: 'discrepancy', pagedPage: 0, pagedPageSize: 50, pagedData: null,
       expandedRows: new Set(),
     };
     let _scEs = null;
@@ -4584,7 +4585,7 @@
           scState.mode = 'done';
           status.textContent = (msg.stopped ? '⏹ stopped — ' : '✓ done — ') +
             `${(msg.total || 0).toLocaleString()} rows`;
-          scState.pagedFilter = 'all';
+          scState.pagedFilter = 'discrepancy';
           scState.pagedPage   = 0;
           scState.expandedRows.clear();
           scLoadPagedResults();
@@ -4688,9 +4689,14 @@
       const pkStr   = (meta.pk_cols || []).join(', ');
       const tblName = meta.table || '';
 
+      // coverage = rows that exist on both sides / total
+      const allRows   = tc.all || 0;
+      const discTotal = (tc.mismatch||0) + (tc.missing||0) + (tc.extra||0);
+      const covPct    = allRows > 0 ? Math.round(((allRows - (tc.missing||0) - (tc.extra||0)) / allRows) * 100) : 100;
+
       const summary = `
         <div class="rc-summary-bar">
-          <div class="rc-stat"><span class="rc-stat-val total">${(tc.all||0).toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+          <div class="rc-stat"><span class="rc-stat-val total">${allRows.toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
           <div class="rc-stat"><span class="rc-stat-val pass">${(tc.match||0).toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
           <div class="rc-stat"><span class="rc-stat-val fail">${(tc.mismatch||0).toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
           <div class="rc-stat"><span class="rc-stat-val warn">${(tc.missing||0).toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
@@ -4698,13 +4704,32 @@
           <div style="margin-left:auto;font-size:11px;color:var(--muted)">${tblName ? `Table: <strong style="color:var(--blue)">${tblName}</strong> &nbsp;` : ''}${pkStr ? `PK: <strong style="color:var(--purple)">${pkStr}</strong>` : ''}</div>
         </div>`;
 
+      const explorerHeader = `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px 6px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+            <span style="font-size:13px;font-weight:600;color:var(--text)">📋 รายงานข้อผิดพลาดทั้งหมด</span>
+            <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;background:${covPct===100?'rgba(80,200,120,0.15)':'rgba(227,179,65,0.15)'};color:${covPct===100?'var(--pass)':'var(--warn)'};border:1px solid ${covPct===100?'var(--pass)':'var(--warn)'}">${covPct}% COVERAGE</span>
+            <span style="font-size:11px;color:var(--muted)">รวม ${discTotal.toLocaleString()} รายการ (mismatch ${(tc.mismatch||0).toLocaleString()} / missing ${(tc.missing||0).toLocaleString()} / extra ${(tc.extra||0).toLocaleString()})</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <a href="/api/reports/download-excel/${SC_REPORT}" target="_blank"
+               style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;text-decoration:none;background:rgba(34,197,94,0.12);border:1px solid var(--pass);color:var(--pass)">
+              📊 Excel (.xlsx)
+            </a>
+            <a href="/api/reports/download-csv/${SC_REPORT}" target="_blank"
+               style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;text-decoration:none;background:var(--surface2);border:1px solid var(--border);color:var(--text)">
+              📄 CSV (raw)
+            </a>
+          </div>
+        </div>`;
+
+      const discCount = (f === 'discrepancy') ? discTotal : (f === 'all' ? allRows : (tc[f] || 0));
       const filterBar = `
         <div class="rc-filter-bar">
-          <button class="rc-filter-btn ${f==='all'?'active':''}" onclick="scSetFilter('all')">ALL (${tc.all||0})</button>
-          <button class="rc-filter-btn ${f==='match'?'active':''}" onclick="scSetFilter('match')">MATCH (${tc.match||0})</button>
-          <button class="rc-filter-btn ${f==='mismatch'?'active':''}" onclick="scSetFilter('mismatch')">MISMATCH (${tc.mismatch||0})</button>
-          <button class="rc-filter-btn ${f==='missing'?'active':''}" onclick="scSetFilter('missing')">MISSING (${tc.missing||0})</button>
-          <button class="rc-filter-btn ${f==='extra'?'active':''}" onclick="scSetFilter('extra')">EXTRA (${tc.extra||0})</button>
+          <button class="rc-filter-btn ${f==='discrepancy'?'active':''}" onclick="scSetFilter('discrepancy')">ALL (${discTotal.toLocaleString()})</button>
+          <button class="rc-filter-btn ${f==='mismatch'?'active':''}" onclick="scSetFilter('mismatch')">MISMATCH (${(tc.mismatch||0).toLocaleString()})</button>
+          <button class="rc-filter-btn ${f==='missing'?'active':''}" onclick="scSetFilter('missing')">MISSING (${(tc.missing||0).toLocaleString()})</button>
+          <button class="rc-filter-btn ${f==='extra'?'active':''}" onclick="scSetFilter('extra')">EXTRA (${(tc.extra||0).toLocaleString()})</button>
           <span style="margin-left:auto;font-size:11px;color:var(--muted)">แสดง ${pageStart+1}–${pageEnd} จาก ${total.toLocaleString()} แถว</span>
         </div>`;
 
@@ -4763,7 +4788,7 @@
           <button class="rc-page-btn" onclick="scGoPage(1)" ${curPage >= totalPages - 1 ? 'disabled' : ''}>Next ▶</button>
         </div>`;
 
-      panel.innerHTML = summary + filterBar + `<div class="rc-body">${bodyHtml}</div>` + pagination;
+      panel.innerHTML = summary + explorerHeader + filterBar + `<div class="rc-body">${bodyHtml}</div>` + pagination;
     }
 
     function rcBuildPanelHtml(tableName) {

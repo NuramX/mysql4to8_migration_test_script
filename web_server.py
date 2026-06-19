@@ -1323,7 +1323,13 @@ def get_full_compare_paged():
             cache = _full_compare_cache[table]
 
         type_counts = cache["type_counts"]
-        total = type_counts.get(filter_type, 0) if filter_type != "all" else type_counts["all"]
+        _DISCREPANCY = {"mismatch", "missing", "extra"}
+        if filter_type == "discrepancy":
+            total = sum(type_counts.get(t, 0) for t in _DISCREPANCY)
+        elif filter_type != "all":
+            total = type_counts.get(filter_type, 0)
+        else:
+            total = type_counts["all"]
         total_pages = max(1, math.ceil(total / page_size))
         page = min(max(page, 0), total_pages - 1)
         start = page * page_size
@@ -1336,7 +1342,10 @@ def get_full_compare_paged():
                 if not line:
                     continue
                 row = json.loads(line)
-                if filter_type != "all" and row.get("type") != filter_type:
+                rtype = row.get("type")
+                if filter_type == "discrepancy" and rtype not in _DISCREPANCY:
+                    continue
+                if filter_type not in ("all", "discrepancy") and rtype != filter_type:
                     continue
                 count += 1
                 if count <= start:
@@ -1661,7 +1670,7 @@ def _sc_reset():
     _sc_done.clear()
     _sc_stop.clear()
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
-    for suffix in ("_full_compare.ndjson", "_compare_meta.json"):
+    for suffix in ("_full_compare.ndjson", "_compare_meta.json", "_mismatches.csv"):
         try:
             os.remove(os.path.join(reports_dir, SC_REPORT + suffix))
         except Exception:
@@ -1694,7 +1703,7 @@ def _sc_worker(sql: str, table: str, db: str):
     ndjson_path = os.path.join(reports_dir, f"{SC_REPORT}_full_compare.ndjson")
     meta_path   = os.path.join(reports_dir, f"{SC_REPORT}_compare_meta.json")
 
-    src_conn = tgt_conn = ndjson_f = None
+    src_conn = tgt_conn = ndjson_f = csv_f = None
     try:
         # Preserve user LIMIT before stripping
         _lm = _re.search(r'\bLIMIT\s+(\d+)\s*$', sql, flags=_re.IGNORECASE)
@@ -1797,7 +1806,12 @@ def _sc_worker(sql: str, table: str, db: str):
                 yield r
 
         # ── Two-pointer merge ─────────────────────────────────────────────────
+        csv_path = os.path.join(reports_dir, f"{SC_REPORT}_mismatches.csv")
         ndjson_f = open(ndjson_path, "w", encoding="utf-8")
+        csv_f    = open(csv_path, "w", newline="", encoding="utf-8-sig")
+        import csv as _csv
+        csv_w    = _csv.writer(csv_f)
+        csv_w.writerow(["Type", "Primary Key", "Column Name", "Source Value", "Target Value"])
         PROG = 10000; MAX_S = 2000
 
         total = matches = mismatches = missing = extra = 0
@@ -1826,40 +1840,47 @@ def _sc_worker(sql: str, table: str, db: str):
                     ndjson_f.write(json.dumps({"type": status, "pk": pk_str(d),
                         "cols": common_cols, "src": src_vals, "tgt": tgt_vals,
                         "diffs": diffs_flag}, ensure_ascii=False) + "\n")
+                    if row_diff:
+                        ps = pk_str(d)
+                        for i, col in enumerate(common_cols):
+                            if diffs_flag[i]:
+                                csv_w.writerow(["mismatch", ps, col,
+                                                src_vals[i] if src_vals[i] is not None else "NULL",
+                                                tgt_vals[i] if tgt_vals[i] is not None else "NULL"])
                     s_row = next(src_gen, None); t_row = next(t_iter, None)
 
                 elif sk < tk:
                     missing += 1; total += 1
                     d = pk_d(sk)
+                    _src = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
                     ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
-                        "cols": common_cols,
-                        "src": [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
-                    }, ensure_ascii=False) + "\n")
+                        "cols": common_cols, "src": _src}, ensure_ascii=False) + "\n")
+                    csv_w.writerow(["missing", pk_str(d), "ALL", "Present in Source", "Missing in Target"])
                     s_row = next(src_gen, None)
                 else:
                     extra += 1; total += 1
                     d = pk_d(tk)
+                    _tgt = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
                     ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
-                        "cols": common_cols,
-                        "tgt": [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
-                    }, ensure_ascii=False) + "\n")
+                        "cols": common_cols, "tgt": _tgt}, ensure_ascii=False) + "\n")
+                    csv_w.writerow(["extra", pk_str(d), "ALL", "Missing in Source", "Extra in Target"])
                     t_row = next(t_iter, None)
 
             elif s_row is not None:
                 missing += 1; total += 1
                 d = pk_d(pk_s(s_row))
+                _src = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
                 ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
-                    "cols": common_cols,
-                    "src": [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
-                }, ensure_ascii=False) + "\n")
+                    "cols": common_cols, "src": _src}, ensure_ascii=False) + "\n")
+                csv_w.writerow(["missing", pk_str(d), "ALL", "Present in Source", "Missing in Target"])
                 s_row = next(src_gen, None)
             else:
                 extra += 1; total += 1
                 d = pk_d(pk_t(t_row))
+                _tgt = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
                 ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
-                    "cols": common_cols,
-                    "tgt": [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
-                }, ensure_ascii=False) + "\n")
+                    "cols": common_cols, "tgt": _tgt}, ensure_ascii=False) + "\n")
+                csv_w.writerow(["extra", pk_str(d), "ALL", "Missing in Source", "Extra in Target"])
                 t_row = next(t_iter, None)
 
             if total - last_prog >= PROG:
@@ -1869,6 +1890,7 @@ def _sc_worker(sql: str, table: str, db: str):
 
         # ── Finish ────────────────────────────────────────────────────────────
         ndjson_f.close(); ndjson_f = None
+        csv_f.close(); csv_f = None
         meta = {"all": total, "match": matches, "mismatch": mismatches,
                 "missing": missing, "extra": extra}
         with open(meta_path, "w", encoding="utf-8") as mf:
@@ -1887,6 +1909,9 @@ def _sc_worker(sql: str, table: str, db: str):
     finally:
         if ndjson_f:
             try: ndjson_f.close()
+            except Exception: pass
+        if csv_f:
+            try: csv_f.close()
             except Exception: pass
         if src_conn:
             try: src_conn.close()
