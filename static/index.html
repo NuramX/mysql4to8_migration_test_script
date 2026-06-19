@@ -2140,16 +2140,6 @@
             <option value="">— เลือก table —</option>
           </select>
           <span id="sc-db-label" style="font-size:11px;color:var(--muted);white-space:nowrap;padding:0 6px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;height:28px;display:flex;align-items:center"></span>
-          <label style="font-size:12px;color:var(--muted);white-space:nowrap;margin-left:8px">Limit:</label>
-          <select id="sc-limit" class="sql-select">
-            <option value="500">500 rows</option>
-            <option value="1000" selected>1000 rows</option>
-            <option value="2000">2000 rows</option>
-            <option value="5000">5000 rows</option>
-            <option value="10000">10,000 rows</option>
-            <option value="25000">25,000 rows</option>
-            <option value="50000">50,000 rows</option>
-          </select>
         </div>
         <div id="sc-columns" style="display:none;flex-wrap:wrap;gap:5px;padding:4px 0"></div>
         <textarea id="sc-sql" class="sql-textarea" placeholder="SELECT col1, col2, col3 FROM `table_name` WHERE ..."
@@ -2162,6 +2152,10 @@
           <button class="sql-run-btn" id="sc-run-btn" onclick="scRun()" style="background:var(--pass)">
             <span id="sc-btn-icon">⚖</span>
             <span id="sc-btn-text">Run Compare</span>
+          </button>
+          <button class="sql-run-btn" id="sc-stop-btn" onclick="scStop()" style="display:none;background:var(--fail)">
+            <span>⏹</span>
+            <span>Stop</span>
           </button>
           <span id="sc-status" style="font-size:11px;color:var(--muted)"></span>
         </div>
@@ -4428,7 +4422,13 @@
     }
 
     // ─── SQL Compare ────────────────────────────────────────────────────────────
-    const scState = { result: null, filter: 'all', pageSize: 25, currentPage: 0, expandedRows: new Set() };
+    const scState = {
+      mode: 'idle',   // 'idle' | 'streaming' | 'done'
+      streamMeta: null, streamProg: null,
+      pagedFilter: 'all', pagedPage: 0, pagedPageSize: 50, pagedData: null,
+      expandedRows: new Set(),
+    };
+    let _scEs = null;
 
     async function scPopulateTables() {
       const sel = document.getElementById('sc-table');
@@ -4520,140 +4520,223 @@
     });
 
     async function scRun() {
-      const sql = (document.getElementById('sc-sql').value || '').trim();
+      const sql   = (document.getElementById('sc-sql').value || '').trim();
       const table = (document.getElementById('sc-table').value || '').trim();
-      const limit = parseInt(document.getElementById('sc-limit').value, 10);
-      const btn = document.getElementById('sc-run-btn');
-      const status = document.getElementById('sc-status');
+      const btn     = document.getElementById('sc-run-btn');
+      const stopBtn = document.getElementById('sc-stop-btn');
+      const status  = document.getElementById('sc-status');
+      const panel   = document.getElementById('sc-panel');
 
       if (!sql) { status.textContent = 'SQL is empty.'; return; }
+      if (_scEs) { _scEs.close(); _scEs = null; }
 
       btn.disabled = true;
+      stopBtn.style.display = 'inline-flex';
       document.getElementById('sc-btn-icon').textContent = '⌛';
       document.getElementById('sc-btn-text').textContent = 'Running…';
       status.textContent = '';
+      scState.mode = 'streaming';
+      scState.streamMeta = null;
+      scState.streamProg = null;
 
-      const t0 = Date.now();
+      panel.innerHTML = `<div class="rc-empty" style="padding:48px 20px">
+        <div style="font-size:28px;margin-bottom:12px">⚡</div>
+        <div style="font-size:14px;color:var(--text)">เริ่ม streaming compare…</div>
+      </div>`;
+
+      const resetBtn = () => {
+        btn.disabled = false;
+        stopBtn.style.display = 'none';
+        document.getElementById('sc-btn-icon').textContent = '⚖';
+        document.getElementById('sc-btn-text').textContent = 'Run Compare';
+      };
+
       try {
-        const res = await fetch('/api/sql-compare', {
+        const res  = await fetch('/api/sql-compare/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sql, table, db: activeDatabase, limit }),
+          body: JSON.stringify({ sql, table, db: activeDatabase }),
         });
         const data = await res.json();
         if (data.error) {
           status.textContent = '❌ ' + data.error;
-          document.getElementById('sc-panel').innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">⚠</div><div style="color:var(--fail)">${sqlEsc(data.error)}</div></div>`;
-          return;
+          panel.innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">⚠</div><div style="color:var(--fail)">${sqlEsc(data.error)}</div></div>`;
+          resetBtn(); return;
         }
-        const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
-        status.textContent = `✓ ${data.total_compared.toLocaleString()} rows in ${elapsed}s`;
-        scState.result = data;
-        scState.filter = 'all';
-        scState.currentPage = 0;
-        scState.expandedRows.clear();
-        scRender();
       } catch (err) {
         status.textContent = '❌ ' + err.message;
-      } finally {
-        btn.disabled = false;
-        document.getElementById('sc-btn-icon').textContent = '⚖';
-        document.getElementById('sc-btn-text').textContent = 'Run Compare';
+        resetBtn(); return;
+      }
+
+      _scEs = new EventSource('/api/sql-compare/stream');
+      _scEs.onmessage = e => {
+        let msg; try { msg = JSON.parse(e.data); } catch { return; }
+
+        if (msg.type === 'sc_start') {
+          scState.streamMeta = msg;
+          scState.streamProg = { total: 0, matches: 0, mismatches: 0, missing: 0, extra: 0 };
+          scRenderProgress();
+        } else if (msg.type === 'sc_progress') {
+          scState.streamProg = msg;
+          scRenderProgress();
+        } else if (msg.type === 'sc_done') {
+          scState.streamProg = msg;
+          scState.mode = 'done';
+          status.textContent = (msg.stopped ? '⏹ stopped — ' : '✓ done — ') +
+            `${(msg.total || 0).toLocaleString()} rows`;
+          scState.pagedFilter = 'all';
+          scState.pagedPage   = 0;
+          scState.expandedRows.clear();
+          scLoadPagedResults();
+        } else if (msg.type === 'error') {
+          status.textContent = '❌ ' + msg.message;
+          panel.innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">⚠</div><div style="color:var(--fail)">${sqlEsc(msg.message)}</div></div>`;
+        } else if (msg.type === 'done') {
+          if (_scEs) { _scEs.close(); _scEs = null; }
+          resetBtn();
+        }
+      };
+      _scEs.onerror = () => {
+        if (_scEs) { _scEs.close(); _scEs = null; }
+        resetBtn();
+      };
+    }
+
+    async function scStop() {
+      if (_scEs) { _scEs.close(); _scEs = null; }
+      await fetch('/api/sql-compare/stop', { method: 'POST' });
+    }
+
+    function scRenderProgress() {
+      const prog = scState.streamProg || {};
+      const meta = scState.streamMeta || {};
+      const pkStr = (meta.pk_cols || []).join(', ');
+      document.getElementById('sc-panel').innerHTML = `
+        <div class="rc-summary-bar">
+          <div class="rc-stat"><span class="rc-stat-val total">${(prog.total||0).toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+          <div class="rc-stat"><span class="rc-stat-val pass">${(prog.matches||0).toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
+          <div class="rc-stat"><span class="rc-stat-val fail">${(prog.mismatches||0).toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
+          <div class="rc-stat"><span class="rc-stat-val warn">${(prog.missing||0).toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
+          <div class="rc-stat"><span class="rc-stat-val purple">${(prog.extra||0).toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
+          ${pkStr ? `<div style="margin-left:auto;font-size:11px;color:var(--muted)">PK: <strong style="color:var(--purple)">${pkStr}</strong></div>` : ''}
+        </div>
+        <div style="padding:32px 20px;text-align:center;color:var(--muted)">
+          <div style="font-size:22px;margin-bottom:8px">⚡</div>
+          <div style="font-size:13px">กำลัง stream &amp; compare…</div>
+          <div style="font-size:11px;margin-top:4px">ผลจะโหลดเมื่อเสร็จสิ้น</div>
+        </div>`;
+    }
+
+    async function scLoadPagedResults() {
+      const panel = document.getElementById('sc-panel');
+      panel.innerHTML = `<div class="rc-empty"><div style="font-size:22px;margin-bottom:8px">⏳</div><div>กำลังโหลดผลลัพธ์…</div></div>`;
+      try {
+        const res  = await fetch('/api/reports/full-compare/paged', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table: '_sql_compare', page: scState.pagedPage,
+            page_size: scState.pagedPageSize, filter_type: scState.pagedFilter }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          panel.innerHTML = `<div class="rc-empty"><div style="color:var(--fail)">${sqlEsc(data.error)}</div></div>`; return;
+        }
+        scState.pagedData = data;
+        scRenderPaged(data);
+      } catch (err) {
+        panel.innerHTML = `<div class="rc-empty"><div style="color:var(--fail)">${err.message}</div></div>`;
       }
     }
 
-    function scGetFiltered() {
-      if (!scState.result) return [];
-      const f = scState.filter;
-      return f === 'all' ? scState.result.rows : scState.result.rows.filter(r => r.status === f);
-    }
-
     function scSetFilter(f) {
-      scState.filter = f;
-      scState.currentPage = 0;
+      if (scState.mode !== 'done') return;
+      scState.pagedFilter = f;
+      scState.pagedPage   = 0;
       scState.expandedRows.clear();
-      scRender();
+      scLoadPagedResults();
     }
 
     function scGoPage(delta) {
-      const filtered = scGetFiltered();
-      const totalPages = Math.max(1, Math.ceil(filtered.length / scState.pageSize));
-      scState.currentPage = Math.min(Math.max(scState.currentPage + delta, 0), totalPages - 1);
-      scRender();
+      if (scState.mode !== 'done' || !scState.pagedData) return;
+      const tp = scState.pagedData.total_pages || 1;
+      scState.pagedPage = Math.min(Math.max(scState.pagedPage + delta, 0), tp - 1);
+      scState.expandedRows.clear();
+      scLoadPagedResults();
     }
 
     function scToggleRow(idx) {
       if (scState.expandedRows.has(idx)) scState.expandedRows.delete(idx);
       else scState.expandedRows.add(idx);
       const container = document.getElementById(`sc-fields-${idx}`);
-      const arrow = document.getElementById(`sc-arrow-${idx}`);
+      const arrow     = document.getElementById(`sc-arrow-${idx}`);
       if (container) container.classList.toggle('open');
-      if (arrow) arrow.classList.toggle('open');
+      if (arrow)     arrow.classList.toggle('open');
     }
 
-    function scRender() {
-      const panel = document.getElementById('sc-panel');
-      if (!panel || !scState.result) return;
-
-      const r = scState.result;
-      const filtered = scGetFiltered();
-      const totalPages = Math.max(1, Math.ceil(filtered.length / scState.pageSize));
-      const pageStart = scState.currentPage * scState.pageSize;
-      const pageEnd = Math.min(pageStart + scState.pageSize, filtered.length);
-      const pageRows = filtered.slice(pageStart, pageEnd);
-      const f = scState.filter;
+    function scRenderPaged(data) {
+      const panel   = document.getElementById('sc-panel');
+      const tc      = data.type_counts || {};
+      const f       = scState.pagedFilter;
+      const samples = data.samples || [];
+      const total   = data.total || 0;
+      const totalPages = data.total_pages || 1;
+      const curPage    = data.page || 0;
+      const pageSize   = data.page_size || 50;
+      const pageStart  = curPage * pageSize;
+      const pageEnd    = pageStart + samples.length;
+      const meta    = scState.streamMeta || {};
+      const pkStr   = (meta.pk_cols || []).join(', ');
+      const tblName = meta.table || '';
 
       const summary = `
         <div class="rc-summary-bar">
-          <div class="rc-stat"><span class="rc-stat-val total">${r.total_compared.toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
-          <div class="rc-stat"><span class="rc-stat-val pass">${r.matches.toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
-          <div class="rc-stat"><span class="rc-stat-val fail">${r.mismatches.toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
-          <div class="rc-stat"><span class="rc-stat-val warn">${r.missing.toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
-          <div class="rc-stat"><span class="rc-stat-val purple">${r.extra.toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
-          <div style="margin-left:auto;font-size:11px;color:var(--muted)">${r.table ? `Table: <strong style="color:var(--blue)">${r.table}</strong> &nbsp;` : ''}PK: <strong style="color:var(--purple)">${r.pk_cols.join(', ')}</strong></div>
+          <div class="rc-stat"><span class="rc-stat-val total">${(tc.all||0).toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+          <div class="rc-stat"><span class="rc-stat-val pass">${(tc.match||0).toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
+          <div class="rc-stat"><span class="rc-stat-val fail">${(tc.mismatch||0).toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
+          <div class="rc-stat"><span class="rc-stat-val warn">${(tc.missing||0).toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
+          <div class="rc-stat"><span class="rc-stat-val purple">${(tc.extra||0).toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
+          <div style="margin-left:auto;font-size:11px;color:var(--muted)">${tblName ? `Table: <strong style="color:var(--blue)">${tblName}</strong> &nbsp;` : ''}${pkStr ? `PK: <strong style="color:var(--purple)">${pkStr}</strong>` : ''}</div>
         </div>`;
 
       const filterBar = `
         <div class="rc-filter-bar">
-          <button class="rc-filter-btn ${f==='all'?'active':''}" onclick="scSetFilter('all')">ALL (${r.total_compared})</button>
-          <button class="rc-filter-btn ${f==='match'?'active':''}" onclick="scSetFilter('match')">MATCH (${r.matches})</button>
-          <button class="rc-filter-btn ${f==='mismatch'?'active':''}" onclick="scSetFilter('mismatch')">MISMATCH (${r.mismatches})</button>
-          <button class="rc-filter-btn ${f==='missing'?'active':''}" onclick="scSetFilter('missing')">MISSING (${r.missing})</button>
-          <button class="rc-filter-btn ${f==='extra'?'active':''}" onclick="scSetFilter('extra')">EXTRA (${r.extra})</button>
-          <span style="margin-left:auto;font-size:11px;color:var(--muted)">แสดง ${pageStart+1}–${pageEnd} จาก ${filtered.length} แถว</span>
+          <button class="rc-filter-btn ${f==='all'?'active':''}" onclick="scSetFilter('all')">ALL (${tc.all||0})</button>
+          <button class="rc-filter-btn ${f==='match'?'active':''}" onclick="scSetFilter('match')">MATCH (${tc.match||0})</button>
+          <button class="rc-filter-btn ${f==='mismatch'?'active':''}" onclick="scSetFilter('mismatch')">MISMATCH (${tc.mismatch||0})</button>
+          <button class="rc-filter-btn ${f==='missing'?'active':''}" onclick="scSetFilter('missing')">MISSING (${tc.missing||0})</button>
+          <button class="rc-filter-btn ${f==='extra'?'active':''}" onclick="scSetFilter('extra')">EXTRA (${tc.extra||0})</button>
+          <span style="margin-left:auto;font-size:11px;color:var(--muted)">แสดง ${pageStart+1}–${pageEnd} จาก ${total.toLocaleString()} แถว</span>
         </div>`;
 
       let bodyHtml = '';
-      if (pageRows.length === 0) {
+      if (!samples.length) {
         bodyHtml = `<div class="rc-empty"><div class="rc-empty-icon">✅</div><div>ไม่มีข้อมูลในหมวดหมู่นี้</div></div>`;
       } else {
-        bodyHtml = pageRows.map((row, pi) => {
-          const globalIdx = pageStart + pi;
-          const isExpanded = scState.expandedRows.has(globalIdx);
-          const pkStr = Object.entries(row.pk).map(([k, v]) => `<span style="color:var(--muted)">${k}:</span> ${v}`).join(', ');
-          const diffCount = row.fields ? row.fields.filter(f => !f.match).length : 0;
-          const badgeLabel = row.status === 'match' ? '✓ MATCH' :
-            row.status === 'missing' ? '⚠ MISSING' :
-            row.status === 'extra'   ? '➕ EXTRA'   : `✗ ${diffCount} DIFF`;
+        bodyHtml = samples.map((row, pi) => {
+          const rowType    = row.type || 'match';
+          const isExpanded = scState.expandedRows.has(pi);
+          const pkStrRow   = Object.entries(row.pk || {}).map(([k, v]) => `<span style="color:var(--muted)">${k}:</span> ${v}`).join(', ');
+          const diffCount  = (row.fields || []).filter(fld => !fld.match).length;
+          const badgeLabel = rowType === 'match'  ? '✓ MATCH'   :
+                             rowType === 'missing' ? '⚠ MISSING' :
+                             rowType === 'extra'   ? '➕ EXTRA'   : `✗ ${diffCount} DIFF`;
 
           let fieldsHtml = '';
           if (row.fields && row.fields.length > 0) {
             fieldsHtml = `
-              <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="sc-fields-${globalIdx}">
+              <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="sc-fields-${pi}">
                 <table class="rc-fields-table">
                   <thead><tr>
-                    <th style="width:30px">✓</th>
-                    <th>Column</th>
-                    <th>Source (MySQL 4)</th>
-                    <th>Target (MySQL 8)</th>
+                    <th style="width:30px">✓</th><th>Column</th>
+                    <th>Source (MySQL 4)</th><th>Target (MySQL 8)</th>
                   </tr></thead>
                   <tbody>
-                    ${row.fields.map(f => {
-                      const cls = f.match ? '' : 'field-diff';
-                      const icon = f.match ? '<span class="field-match-icon ok">✓</span>' : '<span class="field-match-icon diff">✗</span>';
-                      const sv = f.source !== null ? sqlEsc(f.source) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
-                      const tv = f.target !== null ? sqlEsc(f.target) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
-                      return `<tr class="${cls}"><td>${icon}</td><td class="field-col-name">${f.column}</td><td class="field-src">${sv}</td><td class="field-tgt">${tv}</td></tr>`;
+                    ${row.fields.map(fld => {
+                      const cls  = fld.match ? '' : 'field-diff';
+                      const icon = fld.match ? '<span class="field-match-icon ok">✓</span>' : '<span class="field-match-icon diff">✗</span>';
+                      const sv   = fld.source != null ? sqlEsc(String(fld.source)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+                      const tv   = fld.target != null ? sqlEsc(String(fld.target)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+                      return `<tr class="${cls}"><td>${icon}</td><td class="field-col-name">${fld.column}</td><td class="field-src">${sv}</td><td class="field-tgt">${tv}</td></tr>`;
                     }).join('')}
                   </tbody>
                 </table>
@@ -4661,12 +4744,12 @@
           }
 
           return `
-            <div class="rc-row-card ${row.status}">
-              <div class="rc-row-header" onclick="scToggleRow(${globalIdx})">
-                <span class="rc-row-num">#${globalIdx + 1}</span>
-                <span class="rc-row-pk">${pkStr}</span>
-                <span class="rc-row-badge ${row.status}">${badgeLabel}</span>
-                <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="sc-arrow-${globalIdx}">▶</span>
+            <div class="rc-row-card ${rowType}">
+              <div class="rc-row-header" onclick="scToggleRow(${pi})">
+                <span class="rc-row-num">#${pageStart + pi + 1}</span>
+                <span class="rc-row-pk">${pkStrRow}</span>
+                <span class="rc-row-badge ${rowType}">${badgeLabel}</span>
+                <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="sc-arrow-${pi}">▶</span>
               </div>
               ${fieldsHtml}
             </div>`;
@@ -4675,9 +4758,9 @@
 
       const pagination = `
         <div class="rc-pagination">
-          <button class="rc-page-btn" onclick="scGoPage(-1)" ${scState.currentPage <= 0 ? 'disabled' : ''}>◀ Prev</button>
-          <span class="rc-page-info">Page ${scState.currentPage + 1} / ${totalPages}</span>
-          <button class="rc-page-btn" onclick="scGoPage(1)" ${scState.currentPage >= totalPages - 1 ? 'disabled' : ''}>Next ▶</button>
+          <button class="rc-page-btn" onclick="scGoPage(-1)" ${curPage <= 0 ? 'disabled' : ''}>◀ Prev</button>
+          <span class="rc-page-info">Page ${curPage + 1} / ${totalPages}</span>
+          <button class="rc-page-btn" onclick="scGoPage(1)" ${curPage >= totalPages - 1 ? 'disabled' : ''}>Next ▶</button>
         </div>`;
 
       panel.innerHTML = summary + filterBar + `<div class="rc-body">${bodyHtml}</div>` + pagination;

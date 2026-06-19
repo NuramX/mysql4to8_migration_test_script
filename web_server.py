@@ -331,6 +331,7 @@ def at_stream():
 
 # ─── Configuration & Database Discovery Endpoints ──────────────────────────────
 import MySQLdb
+import MySQLdb.cursors
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -1641,7 +1642,318 @@ def get_report_mismatches():
     })
 
 
-# ─── SQL Compare ──────────────────────────────────────────────────────────────
+# ─── SQL Compare Streaming ────────────────────────────────────────────────────
+import re as _re
+
+_sc_thread: threading.Thread | None = None
+_sc_thread_lock = threading.Lock()
+_sc_buffer: list[str] = []
+_sc_buffer_lock = threading.Lock()
+_sc_done = threading.Event()
+_sc_stop = threading.Event()
+SC_REPORT = "_sql_compare"
+
+
+def _sc_reset():
+    global _sc_buffer
+    with _sc_buffer_lock:
+        _sc_buffer = []
+    _sc_done.clear()
+    _sc_stop.clear()
+    reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
+    for suffix in ("_full_compare.ndjson", "_compare_meta.json"):
+        try:
+            os.remove(os.path.join(reports_dir, SC_REPORT + suffix))
+        except Exception:
+            pass
+
+
+def _sc_emit(obj: dict):
+    line = json.dumps(obj, ensure_ascii=False)
+    with _sc_buffer_lock:
+        _sc_buffer.append(line)
+
+
+def _strip_order_limit(sql: str) -> str:
+    s = _re.sub(r'\s+ORDER\s+BY\b[^;]*$', '', sql, flags=_re.IGNORECASE).strip()
+    s = _re.sub(r'\s+LIMIT\s+\d+(\s*,\s*\d+)?\s*$', '', s, flags=_re.IGNORECASE).strip()
+    return s
+
+
+def _sc_worker(sql: str, table: str, db: str):
+    from mysql40 import MySQL40Connection
+    from decimal import Decimal as _Dec, InvalidOperation as _DecErr
+
+    cfg = _load_config()
+    src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
+    tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
+    _tol, _rnd = _numeric_cmp_params(cfg)
+
+    reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    ndjson_path = os.path.join(reports_dir, f"{SC_REPORT}_full_compare.ndjson")
+    meta_path   = os.path.join(reports_dir, f"{SC_REPORT}_compare_meta.json")
+
+    src_conn = tgt_conn = ndjson_f = None
+    try:
+        strip_sql = _strip_order_limit(sql)
+
+        # ── Discover columns & PK ─────────────────────────────────────────────
+        tgt_conn = MySQLdb.connect(
+            host=tgt_cfg["host"], port=int(tgt_cfg["port"]),
+            user=tgt_cfg["user"], passwd=tgt_cfg["password"],
+            db=db, charset="utf8mb4",
+        )
+
+        pk_cols = []
+        if table:
+            tc = tgt_conn.cursor()
+            tc.execute("""
+                SELECT column_name FROM information_schema.key_column_usage
+                WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
+                ORDER BY ordinal_position
+            """, (db, table))
+            pk_cols = [r[0] for r in tc.fetchall()]
+            tc.close()
+
+        src_conn = MySQL40Connection(
+            host=src_cfg["host"], port=int(src_cfg["port"]),
+            user=src_cfg["user"], password=src_cfg["password"],
+            database=db, timeout=3600, charset="tis620",
+        )
+        src_cols, _ = src_conn.query_with_cols(f"{strip_sql} LIMIT 1")
+        src_conn.close(); src_conn = None
+
+        tc = tgt_conn.cursor()
+        tc.execute(f"{strip_sql} LIMIT 1")
+        tgt_cols = [d[0] for d in tc.description] if tc.description else []
+        tc.close()
+
+        tgt_col_set = set(tgt_cols)
+        common_cols = [c for c in src_cols if c in tgt_col_set]
+
+        if not common_cols:
+            _sc_emit({"type": "error", "message": "No common columns between source and target"})
+            _sc_emit({"type": "done", "exit_code": 1}); return
+
+        if not pk_cols:
+            pk_cols = [common_cols[0]]
+
+        missing_pk = [c for c in pk_cols if c not in set(common_cols)]
+        if missing_pk:
+            _sc_emit({"type": "error",
+                      "message": f"PK column(s) {missing_pk} not in SELECT — add them to your query"})
+            _sc_emit({"type": "done", "exit_code": 1}); return
+
+        # ── Build streaming SQL ───────────────────────────────────────────────
+        pk_order = ", ".join(f"`{c}`" for c in pk_cols)
+        stream_sql = f"{strip_sql} ORDER BY {pk_order}"
+
+        _sc_emit({"type": "sc_start", "pk_cols": pk_cols, "columns": common_cols,
+                  "db": db, "table": table, "sql": stream_sql})
+
+        # ── Open streams ──────────────────────────────────────────────────────
+        src_conn = MySQL40Connection(
+            host=src_cfg["host"], port=int(src_cfg["port"]),
+            user=src_cfg["user"], password=src_cfg["password"],
+            database=db, timeout=3600, charset="tis620",
+        )
+
+        tc_setup = tgt_conn.cursor()
+        tc_setup.execute("SET SESSION net_write_timeout=3600")
+        tc_setup.execute("SET SESSION net_read_timeout=3600")
+        tc_setup.close()
+
+        src_idx = {c: i for i, c in enumerate(src_cols)}
+        tgt_idx = {c: i for i, c in enumerate(tgt_cols)}
+        c_src = [src_idx[c] for c in common_cols]
+        c_tgt = [tgt_idx[c] for c in common_cols]
+        pk_si  = [src_idx[c] for c in pk_cols]
+        pk_ti  = [tgt_idx[c] for c in pk_cols]
+
+        def _norm(v):
+            if v is None: return (0, "")
+            s = str(v)
+            try: return (1, _Dec(s))
+            except _DecErr: return (2, s)
+
+        def pk_s(row): return tuple(_norm(row[i]) for i in pk_si)
+        def pk_t(row): return tuple(_norm(row[i]) for i in pk_ti)
+        def pk_d(key): return {pk_cols[j]: str(key[j][1]) for j in range(len(pk_cols))}
+        def pk_str(d): return ", ".join(f"{k}={v}" for k, v in d.items())
+
+        src_gen = src_conn.query_stream(stream_sql)
+
+        tgt_cur = tgt_conn.cursor(MySQLdb.cursors.SSCursor)
+        tgt_cur.execute(stream_sql)
+        def tgt_gen():
+            while not _sc_stop.is_set():
+                r = tgt_cur.fetchone()
+                if r is None: break
+                yield r
+
+        # ── Two-pointer merge ─────────────────────────────────────────────────
+        ndjson_f = open(ndjson_path, "w", encoding="utf-8")
+        PROG = 10000; MAX_S = 2000
+
+        total = matches = mismatches = missing = extra = 0
+        last_prog = 0
+
+        s_row = next(src_gen, None)
+        t_iter = tgt_gen(); t_row = next(t_iter, None)
+
+        while (s_row is not None or t_row is not None) and not _sc_stop.is_set():
+            if s_row is not None and t_row is not None:
+                sk, tk = pk_s(s_row), pk_t(t_row)
+                if sk == tk:
+                    total += 1
+                    diffs_flag = []
+                    row_diff = False
+                    src_vals = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
+                    tgt_vals = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
+                    for i in range(len(common_cols)):
+                        ok = _close_vals(s_row[c_src[i]], t_row[c_tgt[i]], _tol, _rnd)
+                        diffs_flag.append(not ok)
+                        if not ok: row_diff = True
+                    status = "mismatch" if row_diff else "match"
+                    if row_diff: mismatches += 1
+                    else: matches += 1
+                    d = pk_d(sk)
+                    ndjson_f.write(json.dumps({"type": status, "pk": pk_str(d),
+                        "cols": common_cols, "src": src_vals, "tgt": tgt_vals,
+                        "diffs": diffs_flag}, ensure_ascii=False) + "\n")
+                    s_row = next(src_gen, None); t_row = next(t_iter, None)
+
+                elif sk < tk:
+                    missing += 1; total += 1
+                    d = pk_d(sk)
+                    ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
+                        "cols": common_cols,
+                        "src": [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
+                    }, ensure_ascii=False) + "\n")
+                    s_row = next(src_gen, None)
+                else:
+                    extra += 1; total += 1
+                    d = pk_d(tk)
+                    ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
+                        "cols": common_cols,
+                        "tgt": [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
+                    }, ensure_ascii=False) + "\n")
+                    t_row = next(t_iter, None)
+
+            elif s_row is not None:
+                missing += 1; total += 1
+                d = pk_d(pk_s(s_row))
+                ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
+                    "cols": common_cols,
+                    "src": [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
+                }, ensure_ascii=False) + "\n")
+                s_row = next(src_gen, None)
+            else:
+                extra += 1; total += 1
+                d = pk_d(pk_t(t_row))
+                ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
+                    "cols": common_cols,
+                    "tgt": [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
+                }, ensure_ascii=False) + "\n")
+                t_row = next(t_iter, None)
+
+            if total - last_prog >= PROG:
+                last_prog = total
+                _sc_emit({"type": "sc_progress", "total": total, "matches": matches,
+                          "mismatches": mismatches, "missing": missing, "extra": extra})
+
+        # ── Finish ────────────────────────────────────────────────────────────
+        ndjson_f.close(); ndjson_f = None
+        meta = {"all": total, "match": matches, "mismatch": mismatches,
+                "missing": missing, "extra": extra}
+        with open(meta_path, "w", encoding="utf-8") as mf:
+            json.dump(meta, mf)
+
+        stopped = _sc_stop.is_set()
+        _sc_emit({"type": "sc_done", "total": total, "matches": matches,
+                  "mismatches": mismatches, "missing": missing, "extra": extra,
+                  "stopped": stopped})
+        _sc_emit({"type": "done", "exit_code": 0 if not stopped else 1})
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        _sc_emit({"type": "error", "message": str(e)})
+        _sc_emit({"type": "done", "exit_code": 1})
+    finally:
+        if ndjson_f:
+            try: ndjson_f.close()
+            except Exception: pass
+        if src_conn:
+            try: src_conn.close()
+            except Exception: pass
+        if tgt_conn:
+            try: tgt_conn.close()
+            except Exception: pass
+        _sc_done.set()
+
+
+@app.route("/api/sql-compare/run", methods=["POST"])
+def sc_run_stream():
+    global _sc_thread
+    data  = request.json or {}
+    sql   = (data.get("sql") or "").strip()
+    table = (data.get("table") or "").strip()
+    db    = data.get("db", "prs")
+
+    if not sql:
+        return jsonify({"error": "Missing sql"}), 400
+    if not sql.upper().lstrip().startswith("SELECT"):
+        return jsonify({"error": "Only SELECT allowed"}), 400
+
+    with _sc_thread_lock:
+        if _sc_thread and _sc_thread.is_alive():
+            return jsonify({"error": "Already running"}), 409
+        _sc_reset()
+        _sc_thread = threading.Thread(target=_sc_worker, args=(sql, table, db), daemon=True)
+        _sc_thread.start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/sql-compare/stop", methods=["POST"])
+def sc_stop_stream():
+    _sc_stop.set()
+    _sc_done.wait(timeout=15)
+    return jsonify({"stopped": True})
+
+
+@app.route("/api/sql-compare/status")
+def sc_status():
+    with _sc_thread_lock:
+        running = _sc_thread is not None and _sc_thread.is_alive()
+    return jsonify({"running": running, "done": _sc_done.is_set(),
+                    "buffered": len(_sc_buffer)})
+
+
+@app.route("/api/sql-compare/stream")
+def sc_stream():
+    def generate():
+        pos = 0
+        while True:
+            with _sc_buffer_lock:
+                snap = len(_sc_buffer)
+            if pos < snap:
+                with _sc_buffer_lock:
+                    chunk = _sc_buffer[pos:snap]
+                for line in chunk:
+                    yield f"data: {line}\n\n"
+                pos = snap
+                if chunk and '"type": "done"' in chunk[-1]:
+                    return
+            else:
+                if _sc_done.is_set() and pos >= snap:
+                    return
+                time.sleep(0.2)
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ─── SQL Compare (one-shot, legacy) ───────────────────────────────────────────
 @app.route("/api/sql-compare", methods=["POST"])
 def sql_compare():
     """
