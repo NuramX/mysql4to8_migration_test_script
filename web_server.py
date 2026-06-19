@@ -1641,6 +1641,176 @@ def get_report_mismatches():
     })
 
 
+# ─── SQL Compare ──────────────────────────────────────────────────────────────
+@app.route("/api/sql-compare", methods=["POST"])
+def sql_compare():
+    """
+    Run a user-written SELECT on both source and target, compare field-by-field.
+    Accepts: { sql, pk_cols: [], db, limit }
+    Returns same row shape as /api/random-compare.
+    """
+    data = request.json or {}
+    sql = (data.get("sql") or "").strip()
+    db = data.get("db", "prs")
+    table = (data.get("table") or "").strip()
+    row_limit = min(int(data.get("limit", 1000)), 50000)
+
+    if not sql:
+        return jsonify({"error": "Missing 'sql' parameter"}), 400
+
+    sql_upper = sql.upper().lstrip()
+    if not any(sql_upper.startswith(k) for k in ("SELECT", "SHOW", "DESCRIBE", "DESC")):
+        return jsonify({"error": "Only SELECT queries are allowed"}), 400
+
+    exec_sql = sql
+    if sql_upper.startswith("SELECT") and "LIMIT" not in sql_upper:
+        exec_sql = f"{sql} LIMIT {row_limit}"
+
+    cfg = _load_config()
+    src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
+    tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
+    _tol, _rnd = _numeric_cmp_params(cfg)
+
+    src_conn = None
+    tgt_conn = None
+    try:
+        from mysql40 import MySQL40Connection
+        from decimal import Decimal as _Dec, InvalidOperation as _DecErr
+
+        src_conn = MySQL40Connection(
+            host=src_cfg["host"], port=int(src_cfg["port"]),
+            user=src_cfg["user"], password=src_cfg["password"],
+            database=db, timeout=60, charset="tis620",
+        )
+        tgt_conn = MySQLdb.connect(
+            host=tgt_cfg["host"], port=int(tgt_cfg["port"]),
+            user=tgt_cfg["user"], passwd=tgt_cfg["password"],
+            db=db, charset="utf8mb4",
+        )
+
+        src_cols, src_rows_raw = src_conn.query_with_cols(exec_sql)
+
+        tc = tgt_conn.cursor()
+        tc.execute(exec_sql)
+        tgt_cols = [d[0] for d in tc.description] if tc.description else []
+        tgt_rows_raw = tc.fetchall()
+        tc.close()
+
+        tgt_col_set = set(tgt_cols)
+        common_cols = [c for c in src_cols if c in tgt_col_set]
+        if not common_cols:
+            return jsonify({"error": "No common columns between source and target result sets"}), 400
+
+        # Auto-fetch PK from information_schema if table name given
+        pk_cols = []
+        if table:
+            tc = tgt_conn.cursor()
+            tc.execute("""
+                SELECT column_name FROM information_schema.key_column_usage
+                WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
+                ORDER BY ordinal_position
+            """, (db, table))
+            pk_cols = [r[0] for r in tc.fetchall()]
+            tc.close()
+            missing_pk = [c for c in pk_cols if c not in set(common_cols)]
+            if missing_pk:
+                return jsonify({"error": f"PK column(s) {missing_pk} not in SELECT result — add them to your query"}), 400
+
+        if not pk_cols:
+            pk_cols = [common_cols[0]]
+
+        src_col_idx = {c: i for i, c in enumerate(src_cols)}
+        tgt_col_idx = {c: i for i, c in enumerate(tgt_cols)}
+        common_src_idx = [src_col_idx[c] for c in common_cols]
+        common_tgt_idx = [tgt_col_idx[c] for c in common_cols]
+        pk_src_idx = [src_col_idx[c] for c in pk_cols]
+        pk_tgt_idx = [tgt_col_idx[c] for c in pk_cols]
+
+        def _pk_norm(v):
+            if v is None:
+                return (0, "")
+            s = str(v)
+            try:
+                return (1, _Dec(s))
+            except _DecErr:
+                return (2, s)
+
+        src_by_pk = {}
+        for row in src_rows_raw:
+            src_by_pk[tuple(_pk_norm(row[i]) for i in pk_src_idx)] = row
+
+        tgt_by_pk = {}
+        for row in tgt_rows_raw:
+            tgt_by_pk[tuple(_pk_norm(row[i]) for i in pk_tgt_idx)] = row
+
+        result_rows = []
+        total_matches = total_mismatches = total_missing = total_extra = 0
+
+        for key in sorted(set(src_by_pk) | set(tgt_by_pk)):
+            src_row = src_by_pk.get(key)
+            tgt_row = tgt_by_pk.get(key)
+            pk_dict = {pk_cols[j]: str(key[j][1]) for j in range(len(pk_cols))}
+
+            if src_row is not None and tgt_row is not None:
+                fields = []
+                row_has_diff = False
+                for ci, col in enumerate(common_cols):
+                    sv = src_row[common_src_idx[ci]]
+                    tv = tgt_row[common_tgt_idx[ci]]
+                    is_match = _close_vals(sv, tv, _tol, _rnd)
+                    if not is_match:
+                        row_has_diff = True
+                    fields.append({
+                        "column": col,
+                        "source": str(sv) if sv is not None else None,
+                        "target": str(tv) if tv is not None else None,
+                        "match": is_match,
+                    })
+                if row_has_diff:
+                    total_mismatches += 1
+                else:
+                    total_matches += 1
+                result_rows.append({"pk": pk_dict, "status": "mismatch" if row_has_diff else "match", "fields": fields})
+
+            elif src_row is not None:
+                fields = [{"column": col, "source": str(src_row[common_src_idx[ci]]) if src_row[common_src_idx[ci]] is not None else None,
+                           "target": None, "match": False} for ci, col in enumerate(common_cols)]
+                result_rows.append({"pk": pk_dict, "status": "missing", "fields": fields})
+                total_missing += 1
+            else:
+                fields = [{"column": col, "source": None,
+                           "target": str(tgt_row[common_tgt_idx[ci]]) if tgt_row[common_tgt_idx[ci]] is not None else None,
+                           "match": False} for ci, col in enumerate(common_cols)]
+                result_rows.append({"pk": pk_dict, "status": "extra", "fields": fields})
+                total_extra += 1
+
+        return jsonify({
+            "sql": sql,
+            "table": table,
+            "pk_cols": pk_cols,
+            "db": db,
+            "total_compared": len(result_rows),
+            "matches": total_matches,
+            "mismatches": total_mismatches,
+            "missing": total_missing,
+            "extra": total_extra,
+            "columns": common_cols,
+            "rows": result_rows,
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if src_conn:
+            try: src_conn.close()
+            except Exception: pass
+        if tgt_conn:
+            try: tgt_conn.close()
+            except Exception: pass
+
+
 if __name__ == "__main__":
     os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"), exist_ok=True)
     print("  ✓  Migration Validator Dashboard running at http://localhost:5001")

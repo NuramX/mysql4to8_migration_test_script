@@ -1883,6 +1883,9 @@
         <button class="sql-runner-btn" onclick="sqlOpen(null)">
           <span>🔍 SQL Runner</span>
         </button>
+        <button class="sql-runner-btn" onclick="scOpen()" style="border-color:var(--pass);color:var(--pass)">
+          <span>⚖ SQL Compare</span>
+        </button>
         <button id="at-settings-btn" onclick="atOpenSettingsDrawer()" class="settings-btn">
           <span>⚙️ Connections</span>
         </button>
@@ -2118,6 +2121,57 @@
           <span id="sql-status" style="font-size:11px; color:var(--muted)"></span>
         </div>
         <div id="sql-results" class="sql-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SQL Compare Drawer -->
+  <div class="drawer-overlay" id="sc-overlay" onclick="scClose()"></div>
+  <div class="drawer-content" id="sc-drawer" style="width:920px">
+    <div class="drawer-header">
+      <div class="drawer-title">⚖ SQL Compare — field-by-field</div>
+      <button class="drawer-close-btn" onclick="scClose()">&times;</button>
+    </div>
+    <div class="drawer-body" style="padding:0;display:flex;flex-direction:column;height:calc(100% - 52px);overflow:hidden">
+      <div class="sql-toolbar" style="flex-shrink:0;border-bottom:1px solid var(--border)">
+        <div class="sql-controls-row">
+          <label style="font-size:12px;color:var(--muted);white-space:nowrap">Table:</label>
+          <select id="sc-table" class="sql-select" style="flex:1;font-family:'JetBrains Mono',monospace" onchange="scLoadColumns(this.value)">
+            <option value="">— เลือก table —</option>
+          </select>
+          <span id="sc-db-label" style="font-size:11px;color:var(--muted);white-space:nowrap;padding:0 6px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;height:28px;display:flex;align-items:center"></span>
+          <label style="font-size:12px;color:var(--muted);white-space:nowrap;margin-left:8px">Limit:</label>
+          <select id="sc-limit" class="sql-select">
+            <option value="500">500 rows</option>
+            <option value="1000" selected>1000 rows</option>
+            <option value="2000">2000 rows</option>
+            <option value="5000">5000 rows</option>
+            <option value="10000">10,000 rows</option>
+            <option value="25000">25,000 rows</option>
+            <option value="50000">50,000 rows</option>
+          </select>
+        </div>
+        <div id="sc-columns" style="display:none;flex-wrap:wrap;gap:5px;padding:4px 0"></div>
+        <textarea id="sc-sql" class="sql-textarea" placeholder="SELECT col1, col2, col3 FROM `table_name` WHERE ..."
+          spellcheck="false" style="min-height:90px"></textarea>
+        <div style="font-size:11px;color:var(--warn);background:rgba(227,179,65,0.08);border:1px solid rgba(227,179,65,0.3);border-radius:5px;padding:7px 10px;line-height:1.6">
+          ⚠ <strong>ต้อง SELECT Primary Key ทุกครั้ง</strong> — ระบบใช้ PK เพื่อ match แถวระหว่าง Source กับ Target<br>
+          <span style="color:var(--muted)">ถ้า SELECT ไม่รวม PK จะเกิด error "PK column(s) not in SELECT result" — ดู chip สีม่วงด้านบนว่า PK ของ table นี้คืออะไร</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button class="sql-run-btn" id="sc-run-btn" onclick="scRun()" style="background:var(--pass)">
+            <span id="sc-btn-icon">⚖</span>
+            <span id="sc-btn-text">Run Compare</span>
+          </button>
+          <span id="sc-status" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+      </div>
+      <div id="sc-panel" style="flex:1;overflow-y:auto">
+        <div class="rc-empty" style="padding:48px 20px">
+          <div class="rc-empty-icon">⚖</div>
+          <div>เขียน SQL แล้วกด <strong>Run Compare</strong> เพื่อเทียบ field-by-field</div>
+          <div style="margin-top:4px;font-size:11px;color:var(--muted)">ระบุ Key Columns เพื่อ join แถว — ถ้าว่างจะใช้คอลัมน์แรก</div>
+        </div>
       </div>
     </div>
   </div>
@@ -4371,6 +4425,262 @@
 
     function sqlEsc(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ─── SQL Compare ────────────────────────────────────────────────────────────
+    const scState = { result: null, filter: 'all', pageSize: 25, currentPage: 0, expandedRows: new Set() };
+
+    async function scPopulateTables() {
+      const sel = document.getElementById('sc-table');
+      const prevVal = sel.value;
+
+      let tables = Object.keys(atResults).sort();
+      if (!tables.length) tables = (atGetCachedTableList(activeDatabase) || []).slice().sort();
+      if (!tables.length) {
+        try {
+          const res = await fetch('/api/list-tables', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ db: activeDatabase }),
+          });
+          const data = await res.json();
+          tables = (data.tables || []).slice().sort();
+        } catch (e) {}
+      }
+
+      sel.innerHTML = '<option value="">— เลือก table —</option>';
+      tables.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t;
+        if (t === prevVal) opt.selected = true;
+        sel.appendChild(opt);
+      });
+
+      const lbl = document.getElementById('sc-db-label');
+      if (lbl) lbl.textContent = activeDatabase;
+    }
+
+    async function scLoadColumns(table) {
+      const box = document.getElementById('sc-columns');
+      if (!table) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = 'flex';
+      box.innerHTML = '<span style="font-size:11px;color:var(--muted)">loading…</span>';
+      try {
+        const res = await fetch('/api/custom-query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql: `DESCRIBE \`${table}\``, db: activeDatabase, target: 'source', limit: 200 }),
+        });
+        const data = await res.json();
+        const rows = data.source?.rows || [];
+        if (!rows.length) { box.innerHTML = '<span style="font-size:11px;color:var(--muted)">no columns found</span>'; return; }
+        box.innerHTML = rows.map(r => {
+          const c = r[0], isPk = r[3] === 'PRI';
+          const style = isPk
+            ? 'cursor:pointer;font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--purple);background:rgba(188,140,255,0.12);color:var(--purple);white-space:nowrap;font-weight:600'
+            : 'cursor:pointer;font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--blue);white-space:nowrap';
+          const badge = isPk ? ' <span style="font-size:9px;opacity:0.7">PK</span>' : '';
+          return `<span onclick="scInsertCol('${c.replace(/'/g,"\\'")}\')" title="${isPk ? 'Primary Key — ' : ''}คลิกเพื่อ insert" style="${style}">${c}${badge}</span>`;
+        }).join('');
+      } catch (e) {
+        box.innerHTML = `<span style="font-size:11px;color:var(--fail)">${e.message}</span>`;
+      }
+    }
+
+    function scInsertCol(col) {
+      const ta = document.getElementById('sc-sql');
+      const start = ta.selectionStart, end = ta.selectionEnd;
+      ta.value = ta.value.slice(0, start) + col + ta.value.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + col.length;
+      ta.focus();
+    }
+
+    function scOpen() {
+      document.getElementById('sc-overlay').classList.add('active');
+      document.getElementById('sc-drawer').classList.add('active');
+      scPopulateTables();
+      setTimeout(() => document.getElementById('sc-sql').focus(), 100);
+    }
+
+    function scClose() {
+      document.getElementById('sc-overlay').classList.remove('active');
+      document.getElementById('sc-drawer').classList.remove('active');
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        const d = document.getElementById('sc-drawer');
+        if (d && d.classList.contains('active')) scClose();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        const ta = document.getElementById('sc-sql');
+        if (document.activeElement === ta) { e.preventDefault(); scRun(); }
+      }
+    });
+
+    async function scRun() {
+      const sql = (document.getElementById('sc-sql').value || '').trim();
+      const table = (document.getElementById('sc-table').value || '').trim();
+      const limit = parseInt(document.getElementById('sc-limit').value, 10);
+      const btn = document.getElementById('sc-run-btn');
+      const status = document.getElementById('sc-status');
+
+      if (!sql) { status.textContent = 'SQL is empty.'; return; }
+
+      btn.disabled = true;
+      document.getElementById('sc-btn-icon').textContent = '⌛';
+      document.getElementById('sc-btn-text').textContent = 'Running…';
+      status.textContent = '';
+
+      const t0 = Date.now();
+      try {
+        const res = await fetch('/api/sql-compare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql, table, db: activeDatabase, limit }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          status.textContent = '❌ ' + data.error;
+          document.getElementById('sc-panel').innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">⚠</div><div style="color:var(--fail)">${sqlEsc(data.error)}</div></div>`;
+          return;
+        }
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+        status.textContent = `✓ ${data.total_compared.toLocaleString()} rows in ${elapsed}s`;
+        scState.result = data;
+        scState.filter = 'all';
+        scState.currentPage = 0;
+        scState.expandedRows.clear();
+        scRender();
+      } catch (err) {
+        status.textContent = '❌ ' + err.message;
+      } finally {
+        btn.disabled = false;
+        document.getElementById('sc-btn-icon').textContent = '⚖';
+        document.getElementById('sc-btn-text').textContent = 'Run Compare';
+      }
+    }
+
+    function scGetFiltered() {
+      if (!scState.result) return [];
+      const f = scState.filter;
+      return f === 'all' ? scState.result.rows : scState.result.rows.filter(r => r.status === f);
+    }
+
+    function scSetFilter(f) {
+      scState.filter = f;
+      scState.currentPage = 0;
+      scState.expandedRows.clear();
+      scRender();
+    }
+
+    function scGoPage(delta) {
+      const filtered = scGetFiltered();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / scState.pageSize));
+      scState.currentPage = Math.min(Math.max(scState.currentPage + delta, 0), totalPages - 1);
+      scRender();
+    }
+
+    function scToggleRow(idx) {
+      if (scState.expandedRows.has(idx)) scState.expandedRows.delete(idx);
+      else scState.expandedRows.add(idx);
+      const container = document.getElementById(`sc-fields-${idx}`);
+      const arrow = document.getElementById(`sc-arrow-${idx}`);
+      if (container) container.classList.toggle('open');
+      if (arrow) arrow.classList.toggle('open');
+    }
+
+    function scRender() {
+      const panel = document.getElementById('sc-panel');
+      if (!panel || !scState.result) return;
+
+      const r = scState.result;
+      const filtered = scGetFiltered();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / scState.pageSize));
+      const pageStart = scState.currentPage * scState.pageSize;
+      const pageEnd = Math.min(pageStart + scState.pageSize, filtered.length);
+      const pageRows = filtered.slice(pageStart, pageEnd);
+      const f = scState.filter;
+
+      const summary = `
+        <div class="rc-summary-bar">
+          <div class="rc-stat"><span class="rc-stat-val total">${r.total_compared.toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+          <div class="rc-stat"><span class="rc-stat-val pass">${r.matches.toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
+          <div class="rc-stat"><span class="rc-stat-val fail">${r.mismatches.toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
+          <div class="rc-stat"><span class="rc-stat-val warn">${r.missing.toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
+          <div class="rc-stat"><span class="rc-stat-val purple">${r.extra.toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
+          <div style="margin-left:auto;font-size:11px;color:var(--muted)">${r.table ? `Table: <strong style="color:var(--blue)">${r.table}</strong> &nbsp;` : ''}PK: <strong style="color:var(--purple)">${r.pk_cols.join(', ')}</strong></div>
+        </div>`;
+
+      const filterBar = `
+        <div class="rc-filter-bar">
+          <button class="rc-filter-btn ${f==='all'?'active':''}" onclick="scSetFilter('all')">ALL (${r.total_compared})</button>
+          <button class="rc-filter-btn ${f==='match'?'active':''}" onclick="scSetFilter('match')">MATCH (${r.matches})</button>
+          <button class="rc-filter-btn ${f==='mismatch'?'active':''}" onclick="scSetFilter('mismatch')">MISMATCH (${r.mismatches})</button>
+          <button class="rc-filter-btn ${f==='missing'?'active':''}" onclick="scSetFilter('missing')">MISSING (${r.missing})</button>
+          <button class="rc-filter-btn ${f==='extra'?'active':''}" onclick="scSetFilter('extra')">EXTRA (${r.extra})</button>
+          <span style="margin-left:auto;font-size:11px;color:var(--muted)">แสดง ${pageStart+1}–${pageEnd} จาก ${filtered.length} แถว</span>
+        </div>`;
+
+      let bodyHtml = '';
+      if (pageRows.length === 0) {
+        bodyHtml = `<div class="rc-empty"><div class="rc-empty-icon">✅</div><div>ไม่มีข้อมูลในหมวดหมู่นี้</div></div>`;
+      } else {
+        bodyHtml = pageRows.map((row, pi) => {
+          const globalIdx = pageStart + pi;
+          const isExpanded = scState.expandedRows.has(globalIdx);
+          const pkStr = Object.entries(row.pk).map(([k, v]) => `<span style="color:var(--muted)">${k}:</span> ${v}`).join(', ');
+          const diffCount = row.fields ? row.fields.filter(f => !f.match).length : 0;
+          const badgeLabel = row.status === 'match' ? '✓ MATCH' :
+            row.status === 'missing' ? '⚠ MISSING' :
+            row.status === 'extra'   ? '➕ EXTRA'   : `✗ ${diffCount} DIFF`;
+
+          let fieldsHtml = '';
+          if (row.fields && row.fields.length > 0) {
+            fieldsHtml = `
+              <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="sc-fields-${globalIdx}">
+                <table class="rc-fields-table">
+                  <thead><tr>
+                    <th style="width:30px">✓</th>
+                    <th>Column</th>
+                    <th>Source (MySQL 4)</th>
+                    <th>Target (MySQL 8)</th>
+                  </tr></thead>
+                  <tbody>
+                    ${row.fields.map(f => {
+                      const cls = f.match ? '' : 'field-diff';
+                      const icon = f.match ? '<span class="field-match-icon ok">✓</span>' : '<span class="field-match-icon diff">✗</span>';
+                      const sv = f.source !== null ? sqlEsc(f.source) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+                      const tv = f.target !== null ? sqlEsc(f.target) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+                      return `<tr class="${cls}"><td>${icon}</td><td class="field-col-name">${f.column}</td><td class="field-src">${sv}</td><td class="field-tgt">${tv}</td></tr>`;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>`;
+          }
+
+          return `
+            <div class="rc-row-card ${row.status}">
+              <div class="rc-row-header" onclick="scToggleRow(${globalIdx})">
+                <span class="rc-row-num">#${globalIdx + 1}</span>
+                <span class="rc-row-pk">${pkStr}</span>
+                <span class="rc-row-badge ${row.status}">${badgeLabel}</span>
+                <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="sc-arrow-${globalIdx}">▶</span>
+              </div>
+              ${fieldsHtml}
+            </div>`;
+        }).join('');
+      }
+
+      const pagination = `
+        <div class="rc-pagination">
+          <button class="rc-page-btn" onclick="scGoPage(-1)" ${scState.currentPage <= 0 ? 'disabled' : ''}>◀ Prev</button>
+          <span class="rc-page-info">Page ${scState.currentPage + 1} / ${totalPages}</span>
+          <button class="rc-page-btn" onclick="scGoPage(1)" ${scState.currentPage >= totalPages - 1 ? 'disabled' : ''}>Next ▶</button>
+        </div>`;
+
+      panel.innerHTML = summary + filterBar + `<div class="rc-body">${bodyHtml}</div>` + pagination;
     }
 
     function rcBuildPanelHtml(tableName) {
