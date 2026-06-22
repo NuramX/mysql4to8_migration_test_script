@@ -1053,6 +1053,11 @@ def _process_table(table: str, src_cache: dict,
     entry   = src_cache.get(table, {})
     pk_cols = entry.get("pk_cols", [])
     all_cols= entry.get("all_cols", [])
+
+    # Filter out ignored columns, but ALWAYS preserve PK columns
+    ignored = _cfg.get("ignore_fields", {}).get(DATABASE, {}).get(table, [])
+    all_cols = [c for c in all_cols if c not in ignored or c in pk_cols]
+
     has_pk  = bool(pk_cols)
     ts_col  = _window_ts_col(entry)   # None → no window, check full table
 

@@ -18,6 +18,7 @@ import math
 import threading
 import time
 from flask import Flask, Response, jsonify, send_from_directory, request
+import datetime as _dt
 
 app = Flask(__name__, static_folder="static")
 
@@ -450,6 +451,40 @@ def post_config():
         return jsonify({"error": "Failed to write configuration file"}), 500
 
 
+@app.route("/api/config/ignore-fields", methods=["POST"])
+def post_ignore_fields():
+    data = request.json or {}
+    db = data.get("db")
+    table = data.get("table")
+    column = data.get("column")
+    ignore = data.get("ignore", False)
+
+    if not db or not table or not column:
+        return jsonify({"error": "Missing db, table, or column parameter"}), 400
+
+    cfg = _load_config()
+    ignore_fields = cfg.setdefault("ignore_fields", {})
+    db_ignores = ignore_fields.setdefault(db, {})
+    table_ignores = db_ignores.setdefault(table, [])
+
+    if ignore:
+        if column not in table_ignores:
+            table_ignores.append(column)
+    else:
+        if column in table_ignores:
+            table_ignores.remove(column)
+
+    if not table_ignores:
+        db_ignores.pop(table, None)
+    if not db_ignores:
+        ignore_fields.pop(db, None)
+
+    if _save_config(cfg):
+        return jsonify({"success": True, "ignore_fields": cfg.get("ignore_fields", {})})
+    else:
+        return jsonify({"error": "Failed to write configuration file"}), 500
+
+
 @app.route("/api/databases", methods=["GET"])
 def get_databases():
     cfg = _load_config()
@@ -637,6 +672,11 @@ def random_compare():
 
         # Use intersection of columns (in target order)
         common_cols = [c for c in all_cols if c in set(src_col_names)]
+
+        # Exclude ignored columns, preserving primary keys
+        ignored = cfg.get("ignore_fields", {}).get(db, {}).get(table, [])
+        common_cols = [c for c in common_cols if c not in ignored or c in pk_cols]
+
         if not common_cols:
             return jsonify({"error": "No common columns found between source and target"}), 400
 
@@ -1752,6 +1792,12 @@ def _sc_worker(sql: str, table: str, db: str):
 
         tgt_col_set = set(tgt_cols)
         common_cols = [c for c in src_cols if c in tgt_col_set]
+
+        # Filter out ignored columns if a table is specified, but ALWAYS preserve PK columns
+        if table:
+            cfg = _load_config()
+            ignored = cfg.get("ignore_fields", {}).get(db, {}).get(table, [])
+            common_cols = [c for c in common_cols if c not in ignored or c in pk_cols]
 
         if not common_cols:
             _sc_emit({"type": "error", "message": "No common columns between source and target"})

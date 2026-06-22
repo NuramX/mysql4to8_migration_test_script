@@ -851,6 +851,16 @@
       vertical-align: middle;
     }
 
+    .ignored-row {
+      opacity: 0.45;
+      background: rgba(255, 255, 255, 0.015) !important;
+    }
+    .ignored-row td strong {
+      color: var(--muted) !important;
+      text-decoration: line-through;
+      opacity: 0.8;
+    }
+
     .det-type-tag {
       display: inline-block;
       padding: 3px 8px;
@@ -2175,6 +2185,7 @@
     const fmt = n => (typeof n === 'number') ? n.toLocaleString() : (n ?? '—');
 
     // ─── All-tables state ─────────────────────────────────────────────────────────
+    let atConfig = {};
     let atEs = null;
     let atFilter = 'all';
     let atOpenTable = null;
@@ -2337,6 +2348,7 @@
         const res = await fetch('/api/config');
         if (!res.ok) return;
         const data = await res.json();
+        atConfig = data;
 
         // Populate source config fields
         document.getElementById('cfg-src-host').value = data.source.host || '';
@@ -2429,6 +2441,31 @@
         btn.classList.remove('saving');
         msg.style.color = 'var(--fail)';
         msg.textContent = `✗ Failed: Server unreachable`;
+      }
+    }
+
+    async function atToggleIgnoreField(table, column, ignore) {
+      try {
+        const resp = await fetch('/api/config/ignore-fields', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ db: activeDatabase, table, column, ignore }),
+        });
+        const result = await resp.json();
+        if (resp.ok && result.success) {
+          if (!atConfig.ignore_fields) atConfig.ignore_fields = {};
+          atConfig.ignore_fields = result.ignore_fields;
+          
+          const bodyEl = document.getElementById('at-drawer-body');
+          if (bodyEl) {
+            bodyEl.innerHTML = atRenderDetailsContent(table, atResults[table]);
+          }
+        } else {
+          alert('Failed to update ignore field settings: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        console.error('Error toggling ignore field:', err);
+        alert('Error: server unreachable');
       }
     }
 
@@ -2708,11 +2745,13 @@
           warning: `<span class="det-type-tag" style="background:#fff3cd;color:#856404">WARNING</span>`,
         };
         const ROW_CLS = { match: '', mismatch: 'mismatch-row', missing: 'missing-row', extra: 'extra-row', warning: '' };
+        const ignored = (atConfig.ignore_fields && atConfig.ignore_fields[activeDatabase] && atConfig.ignore_fields[activeDatabase][table]) || [];
         schemaDetailsHtml = `
       <div class="det-scroll-box" style="margin-top:8px;">
         <table class="det-sample-table">
           <thead>
             <tr>
+              <th style="width: 60px; text-align: center;">Ignore</th>
               <th>Column Name</th>
               <th>Source (MySQL 4)</th>
               <th>Target (MySQL 8)</th>
@@ -2720,12 +2759,21 @@
             </tr>
           </thead>
           <tbody>
-            ${allCols.map(c => `<tr class="${ROW_CLS[c.status] || ''}">
-              <td><strong style="color:var(--text);font-family:'JetBrains Mono',monospace">${c.name}</strong></td>
-              <td><code style="color:var(--src-col)">${c.src_type ?? '—'}</code></td>
-              <td><code style="color:var(--tgt-col)">${c.tgt_type ?? '—'}</code></td>
-              <td>${STATUS_TAG[c.status] ?? ''}</td>
-            </tr>`).join('')}
+            ${allCols.map(c => {
+              const isPk = (d.pk_cols || []).includes(c.name);
+              const isIgnored = ignored.includes(c.name);
+              const checkboxHtml = isPk
+                ? `<input type="checkbox" checked disabled title="Primary key (cannot be ignored)" style="cursor: not-allowed; opacity: 0.5;" />`
+                : `<input type="checkbox" ${isIgnored ? 'checked' : ''} onchange="atToggleIgnoreField('${table}', '${c.name}', this.checked)" style="cursor: pointer; transform: scale(1.15);" />`;
+              const rowClass = (isIgnored && !isPk) ? 'ignored-row' : (ROW_CLS[c.status] || '');
+              return `<tr class="${rowClass}">
+                <td style="text-align: center; vertical-align: middle;">${checkboxHtml}</td>
+                <td><strong style="color:var(--text);font-family:'JetBrains Mono',monospace">${c.name}</strong></td>
+                <td><code style="color:var(--src-col)">${c.src_type ?? '—'}</code></td>
+                <td><code style="color:var(--tgt-col)">${c.tgt_type ?? '—'}</code></td>
+                <td>${STATUS_TAG[c.status] ?? ''}</td>
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
       </div>
