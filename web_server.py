@@ -503,13 +503,22 @@ def _numeric_cmp_params(cfg):
     return tol, rnd
 
 
+def _norm_val_str(v) -> str:
+    """Normalize date/datetime to consistent string for cross-DB comparison."""
+    if isinstance(v, _dt.datetime):
+        return v.strftime("%Y-%m-%d") if (v.hour == v.minute == v.second == v.microsecond == 0) else v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, _dt.date):
+        return v.strftime("%Y-%m-%d")
+    return str(v)
+
+
 def _close_vals(a, b, tol=Decimal("0.0001"), rnd=None):
     """Check if two values are 'close enough' (handles decimals, nulls, strings)."""
     if a is None and b is None:
         return True
     if a is None or b is None:
         return False
-    sa, sb = str(a).strip(), str(b).strip()
+    sa, sb = _norm_val_str(a).strip(), _norm_val_str(b).strip()
     if sa == sb:
         return True
     try:
@@ -1786,7 +1795,15 @@ def _sc_worker(sql: str, table: str, db: str):
 
         def _norm(v):
             if v is None: return (0, "")
-            s = str(v)
+            # Normalize date/datetime to consistent string so MySQL 4.0
+            # (returns datetime.datetime for DATE cols) matches MySQL 8
+            # (returns datetime.date). Strip zero time to "YYYY-MM-DD".
+            if isinstance(v, _dt.datetime):
+                s = v.strftime("%Y-%m-%d") if (v.hour == v.minute == v.second == v.microsecond == 0) else v.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(v, _dt.date):
+                s = v.strftime("%Y-%m-%d")
+            else:
+                s = str(v)
             try: return (1, _Dec(s))
             except _DecErr: return (2, s)
 

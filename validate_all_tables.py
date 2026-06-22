@@ -351,19 +351,28 @@ def _normalize_type(t: str) -> str:
     return t
 
 
+def _date_str(v) -> str:
+    """Normalize date/datetime to consistent string for cross-DB comparison."""
+    if isinstance(v, _datetime.datetime):
+        return v.strftime("%Y-%m-%d") if (v.hour == v.minute == v.second == v.microsecond == 0) else v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, _datetime.date):
+        return v.strftime("%Y-%m-%d")
+    return str(v)
+
+
 def _close(a, b) -> bool:
     if a is None and b is None:
         return True
     if a is None or b is None:
         return False
     try:
-        da, db = Decimal(str(a)), Decimal(str(b))
+        da, db = Decimal(_date_str(a)), Decimal(_date_str(b))
         if DECIMAL_ROUND is not None:
             q = Decimal(1).scaleb(-DECIMAL_ROUND)   # 10^-N, e.g. N=2 -> 0.01
             return da.quantize(q, rounding=ROUND_HALF_UP) == db.quantize(q, rounding=ROUND_HALF_UP)
         return abs(da - db) <= DECIMAL_TOL
     except InvalidOperation:
-        return str(a) == str(b)
+        return _date_str(a) == _date_str(b)
 
 
 # ─── Schema cache (Option 2: batch pre-fetch) ────────────────────────────────
@@ -624,28 +633,47 @@ def _sql_lit(v) -> str:
     return "'" + s.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
-def _keyset_cond(pk_cols: list[str], last_vals: tuple) -> str:
+def _keyset_cond(pk_cols: list[str], last_vals: tuple,
+                 pk_str_mask: list[bool] | None = None) -> str:
     """Row-value boundary for keyset pagination over a (possibly composite) PK.
     For PK (a,b,c) after (la,lb,lc):
       (a>la) OR (a=la AND b>lb) OR (a=la AND b=lb AND c>lc)
+    pk_str_mask: True for string-type PK cols → use BINARY for byte-value ordering
+    that matches Python str comparison (fixes collation divergence between MySQL 4
+    latin1 byte order and MySQL 8 utf8mb4_0900_ai_ci Unicode DUCET order).
     """
+    mask = pk_str_mask or [False] * len(pk_cols)
+
+    def _col_expr(j):
+        c = pk_cols[j]
+        return f"BINARY `{c}`" if mask[j] else f"`{c}`"
+
+    def _val_expr(j):
+        lit = _sql_lit(last_vals[j])
+        return f"BINARY {lit}" if mask[j] else lit
+
     ors = []
     for i in range(len(pk_cols)):
-        eqs = [f"`{pk_cols[j]}` = {_sql_lit(last_vals[j])}" for j in range(i)]
-        eqs.append(f"`{pk_cols[i]}` > {_sql_lit(last_vals[i])}")
+        eqs = [f"{_col_expr(j)} = {_val_expr(j)}" for j in range(i)]
+        eqs.append(f"{_col_expr(i)} > {_val_expr(i)}")
         ors.append("(" + " AND ".join(eqs) + ")")
     return "(" + " OR ".join(ors) + ")"
 
 
 def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
-                   base_cond: str, chunk_size: int = KEYSET_CHUNK):
+                   base_cond: str, chunk_size: int = KEYSET_CHUNK,
+                   pk_str_mask: list[bool] | None = None):
     """Yield rows in PK order using keyset pagination, so the DB never has to
     filesort the whole result set to disk. `fetch(sql)` runs one page and
     returns a list of row tuples. `base_cond` is a bare WHERE condition
     (no WHERE keyword) or empty string.
     """
+    mask = pk_str_mask or [False] * len(pk_cols)
     pk_indices = [all_cols.index(c) for c in pk_cols]
-    order_by = ", ".join(f"`{c}`" for c in pk_cols)
+    order_by = ", ".join(
+        f"BINARY `{c}`" if mask[i] else f"`{c}`"
+        for i, c in enumerate(pk_cols)
+    )
     col_list = ", ".join(f"`{c}`" for c in all_cols)
     last = None
     while True:
@@ -653,7 +681,7 @@ def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
         if base_cond:
             conds.append(base_cond)
         if last is not None:
-            conds.append(_keyset_cond(pk_cols, last))
+            conds.append(_keyset_cond(pk_cols, last, mask))
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         sql = (f"SELECT {col_list} FROM `{table}` {where} "
                f"ORDER BY {order_by} LIMIT {chunk_size}")
@@ -722,8 +750,25 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
             finally:
                 cur.close()
 
-        src_gen = _keyset_stream(src.query, table, pk_cols, all_cols, base_cond)
-        tgt_gen = _keyset_stream(_tgt_fetch, table, pk_cols, all_cols, base_cond)
+        # Detect string-type PK columns so both streams use BINARY ORDER BY,
+        # matching Python's byte-value str comparison. Fixes collation divergence:
+        # MySQL 4 latin1 byte order vs MySQL 8 utf8mb4_0900_ai_ci DUCET order
+        # (e.g. '-' sorts before '&' in MySQL 8 but after in MySQL 4 / Python).
+        _str_type_keywords = ("char", "text", "enum", "set", "varchar", "binary", "blob")
+        try:
+            src_col_rows = src.query(f"SHOW COLUMNS FROM `{table}`")
+            src_col_type_map = {r[0]: r[1].lower() for r in src_col_rows}
+        except Exception:
+            src_col_type_map = {}
+        pk_str_mask = [
+            any(kw in src_col_type_map.get(c, "") for kw in _str_type_keywords)
+            for c in pk_cols
+        ]
+
+        src_gen = _keyset_stream(src.query, table, pk_cols, all_cols, base_cond,
+                                 pk_str_mask=pk_str_mask)
+        tgt_gen = _keyset_stream(_tgt_fetch, table, pk_cols, all_cols, base_cond,
+                                 pk_str_mask=pk_str_mask)
 
         pk_n = len(pk_cols)
         col_idx = {col: i for i, col in enumerate(all_cols)}
@@ -739,7 +784,15 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
         def _pk_norm(v):
             if v is None:
                 return (0, "")
-            s = str(v)
+            # Normalize date/datetime to consistent string so MySQL 4.0
+            # (returns datetime.datetime for DATE cols) matches MySQL 8
+            # (returns datetime.date). Strip zero time to "YYYY-MM-DD".
+            if isinstance(v, _datetime.datetime):
+                s = v.strftime("%Y-%m-%d") if (v.hour == v.minute == v.second == v.microsecond == 0) else v.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(v, _datetime.date):
+                s = v.strftime("%Y-%m-%d")
+            else:
+                s = str(v)
             try:
                 return (1, Decimal(s))
             except InvalidOperation:
