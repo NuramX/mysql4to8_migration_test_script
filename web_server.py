@@ -334,6 +334,25 @@ def at_stream():
 import MySQLdb
 import MySQLdb.cursors
 
+def _connect_target(tgt_cfg, db):
+    from MySQLdb.constants import FIELD_TYPE
+    from MySQLdb.converters import conversions
+    my_conv = conversions.copy()
+    str_decoder = lambda val: val.decode("utf-8") if isinstance(val, bytes) else str(val)
+    my_conv[FIELD_TYPE.DATE] = str_decoder
+    my_conv[FIELD_TYPE.DATETIME] = str_decoder
+    my_conv[FIELD_TYPE.TIMESTAMP] = str_decoder
+    return MySQLdb.connect(
+        host=tgt_cfg["host"],
+        port=int(tgt_cfg["port"]),
+        user=tgt_cfg["user"],
+        passwd=tgt_cfg["password"],
+        db=db,
+        charset="utf8mb4",
+        conv=my_conv
+    )
+
+
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
@@ -606,14 +625,7 @@ def random_compare():
             timeout=120,
             charset="tis620",
         )
-        tgt_conn = MySQLdb.connect(
-            host=tgt_cfg["host"],
-            port=int(tgt_cfg["port"]),
-            user=tgt_cfg["user"],
-            passwd=tgt_cfg["password"],
-            db=db,
-            charset="utf8mb4",
-        )
+        tgt_conn = _connect_target(tgt_cfg, db)
 
         # Get PK columns from target (information_schema)
         tc = tgt_conn.cursor()
@@ -994,14 +1006,7 @@ def table_timestamp_info():
             timeout=60,
             charset="tis620",
         )
-        tgt_conn = MySQLdb.connect(
-            host=tgt_cfg["host"],
-            port=int(tgt_cfg["port"]),
-            user=tgt_cfg["user"],
-            passwd=tgt_cfg["password"],
-            db=db,
-            charset="utf8mb4",
-        )
+        tgt_conn = _connect_target(tgt_cfg, db)
 
         # Look up the designated MIN/MAX column from ts_field_config.json.
         # This config is generated from the Numbers condition file where each
@@ -1152,11 +1157,7 @@ def custom_query():
 
     if target in ("target", "both"):
         try:
-            tgt_conn = MySQLdb.connect(
-                host=tgt_cfg["host"], port=int(tgt_cfg["port"]),
-                user=tgt_cfg["user"], passwd=tgt_cfg["password"],
-                db=db, charset="utf8mb4",
-            )
+            tgt_conn = _connect_target(tgt_cfg, db)
             exec_sql = sql
             if sql_upper.startswith("SELECT") and "LIMIT" not in sql_upper:
                 exec_sql = f"{sql} LIMIT {row_limit}"
@@ -1760,11 +1761,7 @@ def _sc_worker(sql: str, table: str, db: str):
         strip_sql = _strip_order_limit(sql)
 
         # ── Discover columns & PK ─────────────────────────────────────────────
-        tgt_conn = MySQLdb.connect(
-            host=tgt_cfg["host"], port=int(tgt_cfg["port"]),
-            user=tgt_cfg["user"], passwd=tgt_cfg["password"],
-            db=db, charset="utf8mb4",
-        )
+        tgt_conn = _connect_target(tgt_cfg, db)
 
         pk_cols = []
         if table:
@@ -2086,11 +2083,7 @@ def sql_compare():
             user=src_cfg["user"], password=src_cfg["password"],
             database=db, timeout=60, charset="tis620",
         )
-        tgt_conn = MySQLdb.connect(
-            host=tgt_cfg["host"], port=int(tgt_cfg["port"]),
-            user=tgt_cfg["user"], passwd=tgt_cfg["password"],
-            db=db, charset="utf8mb4",
-        )
+        tgt_conn = _connect_target(tgt_cfg, db)
 
         src_cols, src_rows_raw = src_conn.query_with_cols(exec_sql)
 

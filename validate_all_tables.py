@@ -269,6 +269,14 @@ def _connect_source(db: str):
 
 
 def _connect_target(db: str) -> MySQLdb.Connection:
+    from MySQLdb.constants import FIELD_TYPE
+    from MySQLdb.converters import conversions
+    my_conv = conversions.copy()
+    str_decoder = lambda val: val.decode("utf-8") if isinstance(val, bytes) else str(val)
+    my_conv[FIELD_TYPE.DATE] = str_decoder
+    my_conv[FIELD_TYPE.DATETIME] = str_decoder
+    my_conv[FIELD_TYPE.TIMESTAMP] = str_decoder
+
     return MySQLdb.connect(
         host=TARGET_CFG["host"],
         port=TARGET_CFG["port"],
@@ -276,6 +284,7 @@ def _connect_target(db: str) -> MySQLdb.Connection:
         passwd=TARGET_CFG["password"],
         db=db,
         charset="utf8mb4",
+        conv=my_conv,
     )
 
 
