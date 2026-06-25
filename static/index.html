@@ -1911,10 +1911,12 @@
           title="ตรวจเฉพาะข้อมูลช่วงปี/เดือนนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">
           Data Range:
           <select id="at-year-from" class="db-select" onchange="atOnYearChange('from',this.value)"></select>
-          <select id="at-month-from" class="db-select" disabled style="opacity:0.4"></select>
+          <select id="at-month-from" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('from',this.value)"></select>
+          <select id="at-day-from" class="db-select" disabled style="opacity:0.4"></select>
           –
           <select id="at-year-to" class="db-select" onchange="atOnYearChange('to',this.value)"></select>
-          <select id="at-month-to" class="db-select" disabled style="opacity:0.4"></select>
+          <select id="at-month-to" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('to',this.value)"></select>
+          <select id="at-day-to" class="db-select" disabled style="opacity:0.4"></select>
         </span>
         <button id="at-run-btn" onclick="runAllTables()">
           <div class="spinner"></div>
@@ -2205,12 +2207,18 @@
       let yt = parseInt(document.getElementById('at-year-to')?.value, 10);
       let mf = parseInt(document.getElementById('at-month-from')?.value, 10);
       let mt = parseInt(document.getElementById('at-month-to')?.value, 10);
-      if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) { [yf, yt] = [yt, yf]; [mf, mt] = [mt, mf]; }
+      let df = parseInt(document.getElementById('at-day-from')?.value, 10);
+      let dt = parseInt(document.getElementById('at-day-to')?.value, 10);
+      if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
+        [yf, yt] = [yt, yf]; [mf, mt] = [mt, mf]; [df, dt] = [dt, df];
+      }
       return {
-        year_from:       Number.isFinite(yf) ? yf : null,
-        year_to:         Number.isFinite(yt) ? yt : null,
-        month_from:      Number.isFinite(mf) ? mf : null,
-        month_to:        Number.isFinite(mt) ? mt : null,
+        year_from:  Number.isFinite(yf) ? yf : null,
+        year_to:    Number.isFinite(yt) ? yt : null,
+        month_from: Number.isFinite(mf) ? mf : null,
+        month_to:   Number.isFinite(mt) ? mt : null,
+        day_from:   Number.isFinite(df) ? df : null,
+        day_to:     Number.isFinite(dt) ? dt : null,
       };
     }
 
@@ -3953,17 +3961,28 @@
       atLoadTableList();
     });
 
+    function _setDisabled(el, disabled) {
+      if (!el) return;
+      el.disabled = disabled;
+      el.style.opacity = disabled ? '0.4' : '1';
+      if (disabled) el.value = '';
+    }
+
     function atOnYearChange(side, val) {
       const monthEl = document.getElementById(`at-month-${side}`);
-      if (!monthEl) return;
+      const dayEl   = document.getElementById(`at-day-${side}`);
       if (!val) {
-        monthEl.value = '';
-        monthEl.disabled = true;
-        monthEl.style.opacity = '0.4';
+        _setDisabled(monthEl, true);
+        _setDisabled(dayEl, true);
       } else {
-        monthEl.disabled = false;
-        monthEl.style.opacity = '1';
+        _setDisabled(monthEl, false);
+        _setDisabled(dayEl, true); // day still needs month
       }
+    }
+
+    function atOnMonthChange(side, val) {
+      const dayEl = document.getElementById(`at-day-${side}`);
+      _setDisabled(dayEl, !val);
     }
 
     // Populate year/month dropdowns.
@@ -3991,6 +4010,12 @@
         MONTHS.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
       if (mFromEl) mFromEl.innerHTML = monthOpts;
       if (mToEl)   mToEl.innerHTML   = monthOpts;
+      const dayOpts = `<option value="">-</option>` +
+        Array.from({length: 31}, (_, i) => `<option value="${i+1}">${String(i+1).padStart(2,'0')}</option>`).join('');
+      const dFromEl = document.getElementById('at-day-from');
+      const dToEl   = document.getElementById('at-day-to');
+      if (dFromEl) dFromEl.innerHTML = dayOpts;
+      if (dToEl)   dToEl.innerHTML   = dayOpts;
     }
 
     async function atReplayIfAvailable() {

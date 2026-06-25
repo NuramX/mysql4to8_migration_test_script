@@ -128,28 +128,24 @@ def _reader_thread(proc: subprocess.Popen):
     _run_done.set()
 
 
-def _get_data_window(year_from, year_to, month_from, month_to, data_window_years=0):
+def _get_data_window(year_from, year_to, month_from, month_to, data_window_years=0,
+                     day_from=None, day_to=None):
     import datetime as _dt
-    try:
-        yfrom = int(year_from) if year_from is not None else None
-    except (ValueError, TypeError):
-        yfrom = None
-    try:
-        yto = int(year_to) if year_to is not None else None
-    except (ValueError, TypeError):
-        yto = None
-    try:
-        mfrom = int(month_from) if month_from is not None else None
-        if mfrom is not None and not (1 <= mfrom <= 12):
-            mfrom = None
-    except (ValueError, TypeError):
-        mfrom = None
-    try:
-        mto = int(month_to) if month_to is not None else None
-        if mto is not None and not (1 <= mto <= 12):
-            mto = None
-    except (ValueError, TypeError):
-        mto = None
+    def _int(v, lo=None, hi=None):
+        try:
+            n = int(v)
+            if lo is not None and n < lo: return None
+            if hi is not None and n > hi: return None
+            return n
+        except (ValueError, TypeError):
+            return None
+
+    yfrom = _int(year_from)
+    yto   = _int(year_to)
+    mfrom = _int(month_from, 1, 12)
+    mto   = _int(month_to,   1, 12)
+    dfrom = _int(day_from,   1, 31)
+    dto   = _int(day_to,     1, 31)
 
     base_year = _dt.date.today().year
     if yfrom is not None:
@@ -160,14 +156,23 @@ def _get_data_window(year_from, year_to, month_from, month_to, data_window_years
         _yfrom = None
 
     if _yfrom is not None:
-        win_start = f"{_yfrom}-{mfrom if mfrom else 1:02d}-01"
+        _dm = mfrom if mfrom else 1
+        _dd = dfrom if dfrom else 1
+        win_start = f"{_yfrom}-{_dm:02d}-{_dd:02d}"
     else:
         win_start = None
 
     today_str = _dt.date.today().isoformat()
     if yto is not None:
         _mto = mto if mto else 12
-        if _mto == 12:
+        # day_to only applies when year+month both explicit
+        if dto is not None and mto is not None:
+            try:
+                d_end = _dt.date(yto, _mto, dto) + _dt.timedelta(days=1)
+                calc_end = d_end.isoformat()
+            except ValueError:
+                calc_end = f"{yto}-{_mto + 1:02d}-01" if _mto < 12 else f"{yto + 1}-01-01"
+        elif _mto == 12:
             calc_end = f"{yto + 1}-01-01"
         else:
             calc_end = f"{yto}-{_mto + 1:02d}-01"
@@ -659,11 +664,10 @@ def random_compare():
         # data_window_years calendar years. Uses first date-typed PK column.
         win_years = int((cfg.get("tuning") or {}).get("data_window_years", 0))
         win_start, win_end = _get_data_window(
-            data.get("year_from"),
-            data.get("year_to"),
-            data.get("month_from"),
-            data.get("month_to"),
-            win_years
+            data.get("year_from"), data.get("year_to"),
+            data.get("month_from"), data.get("month_to"),
+            win_years,
+            data.get("day_from"), data.get("day_to"),
         )
 
         win_cond = ""
@@ -977,11 +981,10 @@ def table_timestamp_info():
     # Year window: explicit request range, else config default (last N years)
     win_years = int((cfg.get("tuning") or {}).get("data_window_years", 0))
     win_start, win_end = _get_data_window(
-        data.get("year_from"),
-        data.get("year_to"),
-        data.get("month_from"),
-        data.get("month_to"),
-        win_years
+        data.get("year_from"), data.get("year_to"),
+        data.get("month_from"), data.get("month_to"),
+        win_years,
+        data.get("day_from"), data.get("day_to"),
     )
 
     def _win_where(col):
