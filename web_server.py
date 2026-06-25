@@ -236,6 +236,8 @@ def at_run_validation():
     year_to    = data.get("year_to")
     month_from      = data.get("month_from")         # int 1-12 or None
     month_to        = data.get("month_to")
+    day_from        = data.get("day_from")
+    day_to          = data.get("day_to")
 
     with _process_lock:
         if _process is not None and _process.poll() is None:
@@ -258,6 +260,10 @@ def at_run_validation():
             cmd += ["--month-from", str(int(month_from))]
         if month_to:
             cmd += ["--month-to", str(int(month_to))]
+        if day_from:
+            cmd += ["--day-from", str(int(day_from))]
+        if day_to:
+            cmd += ["--day-to", str(int(day_to))]
         if tables_filter:
             cmd += ["--tables", ",".join(tables_filter)]
         _process = subprocess.Popen(

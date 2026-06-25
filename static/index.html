@@ -2585,7 +2585,7 @@
     // Cache key includes the year window — changing years must refetch, not reuse
     function atTsCacheKey(table) {
       const w = atYearWindow();
-      return `${table}|${w.year_from ?? ''}|${w.year_to ?? ''}|${w.month_from ?? ''}|${w.month_to ?? ''}`;
+      return `${table}|${w.year_from ?? ''}|${w.year_to ?? ''}|${w.month_from ?? ''}|${w.month_to ?? ''}|${w.day_from ?? ''}|${w.day_to ?? ''}`;
     }
 
     async function atLoadTsInfo(table, db, pkCols) {

@@ -91,6 +91,8 @@ _year_from  = _cli_int("--year-from")
 _year_to    = _cli_int("--year-to")
 _month_from = _cli_int("--month-from")
 _month_to   = _cli_int("--month-to")
+_day_from   = _cli_int("--day-from")
+_day_to     = _cli_int("--day-to")
 
 # Validate month range (1-12)
 for _mflag, _mval in (("--month-from", _month_from), ("--month-to", _month_to)):
@@ -101,11 +103,25 @@ for _mflag, _mval in (("--month-from", _month_from), ("--month-to", _month_to)):
         else:
             _month_to = None
 
-def _month_start(year: int, month: int) -> str:
-    return f"{year}-{month:02d}-01"
+# Validate day range (1-31); day only meaningful when matching month is set
+for _dflag, _dval, _mval in (("--day-from", _day_from, _month_from), ("--day-to", _day_to, _month_to)):
+    if _dval is not None and (not (1 <= _dval <= 31) or _mval is None):
+        if _dflag == "--day-from":
+            _day_from = None
+        else:
+            _day_to = None
 
-def _month_end_exclusive(year: int, month: int) -> str:
-    """First day of the month AFTER month (exclusive upper bound)."""
+def _month_start(year: int, month: int, day: int = 1) -> str:
+    return f"{year}-{month:02d}-{day:02d}"
+
+def _month_end_exclusive(year: int, month: int, day: int | None = None) -> str:
+    """Exclusive upper bound: next day if day given, else first day of next month."""
+    if day is not None:
+        try:
+            d = _datetime.date(year, month, day) + _datetime.timedelta(days=1)
+            return d.isoformat()
+        except ValueError:
+            pass
     if month == 12:
         return f"{year + 1}-01-01"
     return f"{year}-{month + 1:02d}-01"
@@ -121,7 +137,8 @@ else:
     _yfrom = None
 
 if _yfrom is not None:
-    WINDOW_START = _month_start(_yfrom, _month_from if _month_from else 1)
+    WINDOW_START = _month_start(_yfrom, _month_from if _month_from else 1,
+                                _day_from if _day_from else 1)
 else:
     WINDOW_START = None
 
@@ -129,7 +146,7 @@ else:
 # never included. If user specified a past year/month the calculated end is
 # already before today and the min() leaves it unchanged.
 if _year_to is not None:
-    _calc_end = _month_end_exclusive(_year_to, _month_to if _month_to else 12)
+    _calc_end = _month_end_exclusive(_year_to, _month_to if _month_to else 12, _day_to)
     WINDOW_END = min(_calc_end, _today.isoformat())
 else:
     # No explicit upper bound → default cap is today (exclude today's data).
