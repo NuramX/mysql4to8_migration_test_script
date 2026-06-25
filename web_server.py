@@ -172,13 +172,6 @@ def _get_data_window(year_from, year_to, month_from, month_to, data_window_years
         else:
             calc_end = f"{yto}-{_mto + 1:02d}-01"
         win_end = min(calc_end, today_str)
-    elif mto is not None:
-        # month_to set but year_to not — use current year as reference
-        if mto == 12:
-            calc_end = f"{base_year + 1}-01-01"
-        else:
-            calc_end = f"{base_year}-{mto + 1:02d}-01"
-        win_end = min(calc_end, today_str)
     else:
         win_end = today_str
 

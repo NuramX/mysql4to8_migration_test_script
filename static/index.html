@@ -1910,11 +1910,11 @@
         <span style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px"
           title="ตรวจเฉพาะข้อมูลช่วงปี/เดือนนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">
           Data Range:
-          <select id="at-year-from" class="db-select"></select>
-          <select id="at-month-from" class="db-select"></select>
+          <select id="at-year-from" class="db-select" onchange="atOnYearChange('from',this.value)"></select>
+          <select id="at-month-from" class="db-select" disabled style="opacity:0.4"></select>
           –
-          <select id="at-year-to" class="db-select"></select>
-          <select id="at-month-to" class="db-select"></select>
+          <select id="at-year-to" class="db-select" onchange="atOnYearChange('to',this.value)"></select>
+          <select id="at-month-to" class="db-select" disabled style="opacity:0.4"></select>
         </span>
         <button id="at-run-btn" onclick="runAllTables()">
           <div class="spinner"></div>
@@ -3952,6 +3952,19 @@
       atReplayIfAvailable();
       atLoadTableList();
     });
+
+    function atOnYearChange(side, val) {
+      const monthEl = document.getElementById(`at-month-${side}`);
+      if (!monthEl) return;
+      if (!val) {
+        monthEl.value = '';
+        monthEl.disabled = true;
+        monthEl.style.opacity = '0.4';
+      } else {
+        monthEl.disabled = false;
+        monthEl.style.opacity = '1';
+      }
+    }
 
     // Populate year/month dropdowns.
     async function atInitYearWindow() {
