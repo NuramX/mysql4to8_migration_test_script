@@ -28,6 +28,10 @@ except Exception as _e:
 
 SOURCE_CFG: dict = _cfg.get("source", {})
 TARGET_CFG: dict = _cfg.get("target", {})
+if not TARGET_CFG:
+    _tgts = _cfg.get("targets", [])
+    if isinstance(_tgts, list) and len(_tgts) > 0:
+        TARGET_CFG = _tgts[0]
 _tuning     = _cfg.get("tuning", {})
 import os
 
@@ -285,7 +289,19 @@ def _connect_source(db: str):
     )
 
 
-def _connect_target(db: str) -> MySQLdb.Connection:
+def _connect_target(db: str):
+    if TARGET_CFG.get("version") == 4:
+        from mysql40 import MySQL40Connection
+        return MySQL40Connection(
+            host=TARGET_CFG["host"],
+            port=TARGET_CFG["port"],
+            user=TARGET_CFG["user"],
+            password=TARGET_CFG["password"],
+            database=db,
+            timeout=30,
+            charset="tis620",
+        )
+
     from MySQLdb.constants import FIELD_TYPE
     from MySQLdb.converters import conversions
     my_conv = conversions.copy()
@@ -325,6 +341,14 @@ def _src_pk_cols(src, table: str) -> list[str]:
 
 
 def _tgt_pk_cols(tgt, table: str) -> list[str]:
+    if TARGET_CFG.get("version") == 4:
+        tc = tgt.cursor()
+        tc.execute(f"SHOW INDEX FROM `{table}`")
+        rows = tc.fetchall()
+        pk = [(int(r[3]), r[4]) for r in rows if r[2] == "PRIMARY"]
+        tc.close()
+        return [col for _, col in sorted(pk)]
+
     tc = tgt.cursor()
     tc.execute(f"""
         SELECT column_name FROM information_schema.key_column_usage
@@ -342,6 +366,13 @@ def _src_all_cols(src, table: str) -> list[str]:
 
 
 def _tgt_all_cols(tgt, table: str) -> list[str]:
+    if TARGET_CFG.get("version") == 4:
+        tc = tgt.cursor()
+        tc.execute(f"SHOW COLUMNS FROM `{table}`")
+        rows = tc.fetchall()
+        tc.close()
+        return [r[0] for r in rows]
+
     tc = tgt.cursor()
     tc.execute(f"""
         SELECT column_name FROM information_schema.columns
@@ -424,6 +455,21 @@ def _load_src_schema_cache(src, tables: list[str]) -> dict:
 
 def _load_tgt_schema_cache(tgt, db: str) -> tuple[dict, dict]:
     """Batch-load all columns + indexes from target in 2 queries (vs 94×3 before)."""
+    if TARGET_CFG.get("version") == 4:
+        col_cache = {}
+        idx_cache = {}
+        tc = tgt.cursor()
+        tc.execute("SHOW TABLES")
+        tables = [r[0] for r in tc.fetchall()]
+        for table in tables:
+            tc.execute(f"SHOW COLUMNS FROM `{table}`")
+            col_cache[table] = [(r[0], r[1], r[2], r[3]) for r in tc.fetchall()]
+            
+            tc.execute(f"SHOW INDEX FROM `{table}`")
+            idx_cache[table] = [(None, int(r[1]), r[2], int(r[3]), r[4]) for r in tc.fetchall()]
+        tc.close()
+        return col_cache, idx_cache
+
     tc = tgt.cursor()
 
     tc.execute("""
@@ -489,15 +535,21 @@ def check_schema(table: str, src, tgt,
                         for r in tgt_col_cache}
         else:
             tc = tgt.cursor()
-            tc.execute("""
-                SELECT column_name, column_type, is_nullable, column_key
-                FROM information_schema.columns
-                WHERE table_schema = %s AND table_name = %s
-                ORDER BY ordinal_position
-            """, (DATABASE, table))
-            tgt_cols = {r[0]: {"type": r[1], "null": r[2], "key": r[3]}
-                        for r in tc.fetchall()}
+            if TARGET_CFG.get("version") == 4:
+                tc.execute(f"SHOW COLUMNS FROM `{table}`")
+                tgt_cols = {r[0]: {"type": r[1], "null": r[2], "key": r[3]}
+                            for r in tc.fetchall()}
+            else:
+                tc.execute("""
+                    SELECT column_name, column_type, is_nullable, column_key
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY ordinal_position
+                """, (DATABASE, table))
+                tgt_cols = {r[0]: {"type": r[1], "null": r[2], "key": r[3]}
+                            for r in tc.fetchall()}
             tc.close()
+
 
         diffs = []
         warnings = []
@@ -818,10 +870,14 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
 
     try:
         setup = tgt_conn.cursor()
-        setup.execute("SET SESSION net_write_timeout = 3600")
-        setup.execute("SET SESSION net_read_timeout  = 3600")
-        setup.execute("SET SESSION sort_buffer_size = 268435456")
+        try:
+            setup.execute("SET SESSION net_write_timeout = 3600")
+            setup.execute("SET SESSION net_read_timeout  = 3600")
+            setup.execute("SET SESSION sort_buffer_size = 268435456")
+        except Exception:
+            pass
         setup.close()
+
 
         def _tgt_fetch(sql):
             cur = tgt_conn.cursor()

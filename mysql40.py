@@ -59,7 +59,65 @@ def _send_packet(sock: socket.socket, data: bytes, seq: int) -> None:
     sock.sendall(header + data)
 
 
+class MySQL40Cursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self.last_result = None
+        self.row_idx = 0
+
+    def execute(self, sql, args=None):
+        if args is not None:
+            if isinstance(args, (tuple, list)):
+                formatted_args = []
+                for x in args:
+                    if isinstance(x, str):
+                        formatted_args.append("'" + x.replace("'", "\\'") + "'")
+                    elif x is None:
+                        formatted_args.append("NULL")
+                    else:
+                        formatted_args.append(str(x))
+                sql = sql % tuple(formatted_args)
+            elif isinstance(args, dict):
+                formatted_dict = {}
+                for k, v in args.items():
+                    if isinstance(v, str):
+                        formatted_dict[k] = "'" + v.replace("'", "\\'") + "'"
+                    elif v is None:
+                        formatted_dict[k] = "NULL"
+                    else:
+                        formatted_dict[k] = str(v)
+                sql = sql % formatted_dict
+            else:
+                if isinstance(args, str):
+                    sql = sql % ("'" + args.replace("'", "\\'") + "'")
+                elif args is None:
+                    sql = sql % "NULL"
+                else:
+                    sql = sql % str(args)
+        self.last_result = self.conn.query(sql)
+        self.row_idx = 0
+
+    def fetchall(self):
+        res = self.last_result or []
+        self.last_result = None
+        return res
+
+    def fetchone(self):
+        if not self.last_result or self.row_idx >= len(self.last_result):
+            return None
+        row = self.last_result[self.row_idx]
+        self.row_idx += 1
+        return row
+
+    def close(self):
+        self.last_result = None
+        self.row_idx = 0
+
+
 class MySQL40Connection:
+    def cursor(self):
+        return MySQL40Cursor(self)
+
     def __init__(self, host: str, port: int, user: str,
                  password: str, database: str, timeout: int = 30,
                  charset: str = 'latin1'):

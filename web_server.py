@@ -342,10 +342,28 @@ def at_stream():
 
 
 # ─── Configuration & Database Discovery Endpoints ──────────────────────────────
-import MySQLdb
-import MySQLdb.cursors
+try:
+    import MySQLdb
+    import MySQLdb.cursors
+except ModuleNotFoundError:
+    import pymysql
+    pymysql.install_as_MySQLdb()
+    import MySQLdb          # noqa: F811  (now resolves via pymysql shim)
+    import MySQLdb.cursors  # noqa: F811
 
 def _connect_target(tgt_cfg, db):
+    if int(tgt_cfg.get("version", 8)) == 4:
+        from mysql40 import MySQL40Connection
+        return MySQL40Connection(
+            host=tgt_cfg["host"],
+            port=int(tgt_cfg["port"]),
+            user=tgt_cfg["user"],
+            password=tgt_cfg["password"],
+            database=db,
+            timeout=30,
+            charset="tis620",
+        )
+
     from MySQLdb.constants import FIELD_TYPE
     from MySQLdb.converters import conversions
     my_conv = conversions.copy()
@@ -362,6 +380,44 @@ def _connect_target(tgt_cfg, db):
         charset="utf8mb4",
         conv=my_conv
     )
+
+
+def _get_tgt_pk_cols(tgt_conn, tgt_version, db, table):
+    if tgt_version == 4:
+        tc = tgt_conn.cursor()
+        tc.execute(f"SHOW INDEX FROM `{table}`")
+        rows = tc.fetchall()
+        pk = [(int(r[3]), r[4]) for r in rows if r[2] == "PRIMARY"]
+        tc.close()
+        return [col for _, col in sorted(pk)]
+    tc = tgt_conn.cursor()
+    tc.execute("""
+        SELECT column_name FROM information_schema.key_column_usage
+        WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
+        ORDER BY ordinal_position
+    """, (db, table))
+    pk_cols = [r[0] for r in tc.fetchall()]
+    tc.close()
+    return pk_cols
+
+
+def _get_tgt_all_cols(tgt_conn, tgt_version, db, table):
+    if tgt_version == 4:
+        tc = tgt_conn.cursor()
+        tc.execute(f"SHOW COLUMNS FROM `{table}`")
+        rows = tc.fetchall()
+        tc.close()
+        return [r[0] for r in rows]
+    tc = tgt_conn.cursor()
+    tc.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s
+        ORDER BY ordinal_position
+    """, (db, table))
+    all_cols = [r[0] for r in tc.fetchall()]
+    tc.close()
+    return all_cols
+
 
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -381,6 +437,16 @@ def _load_config():
         except Exception:
             pass
     return DEFAULT_CONFIG.copy()
+
+
+def _get_target_config(cfg):
+    t = cfg.get("target")
+    if not t:
+        _tgts = cfg.get("targets", [])
+        if isinstance(_tgts, list) and len(_tgts) > 0:
+            t = _tgts[0]
+    return t or DEFAULT_CONFIG["target"]
+
 
 
 def _save_config(cfg):
@@ -411,15 +477,30 @@ def post_config():
     
     # Test target connection
     try:
-        t_conn = MySQLdb.connect(
-            host=target["host"],
-            port=int(target["port"]),
-            user=target["user"],
-            passwd=target["password"],
-            connect_timeout=3
-        )
-        t_conn.close()
+        if int(target.get("version", 8)) == 4:
+            from mysql40 import MySQL40Connection
+            t_conn = MySQL40Connection(
+                host=target["host"],
+                port=int(target["port"]),
+                user=target["user"],
+                password=target["password"],
+                database=data.get("default_db", "prs"),
+                timeout=10
+            )
+            t_conn.close()
+        else:
+            t_conn = MySQLdb.connect(
+                host=target["host"],
+                port=int(target["port"]),
+                user=target["user"],
+                passwd=target["password"],
+                connect_timeout=10
+            )
+            t_conn.close()
     except Exception as e:
+        import socket as _sock
+        if isinstance(e, _sock.timeout):
+            return jsonify({"error": f"Target DB Connection Error: connection timed out ({target.get('host')}:{target.get('port')})"}), 400
         return jsonify({"error": f"Target DB Connection Error: {str(e)}"}), 400
 
     # Test source connection
@@ -431,10 +512,13 @@ def post_config():
             user=source["user"],
             password=source["password"],
             database=data.get("default_db", "prs"),
-            timeout=3
+            timeout=10
         )
         s_conn.close()
     except Exception as e:
+        import socket as _sock
+        if isinstance(e, _sock.timeout):
+            return jsonify({"error": f"Source DB Connection Error: connection timed out ({source.get('host')}:{source.get('port')})"}), 400
         return jsonify({"error": f"Source DB Connection Error: {str(e)}"}), 400
 
     # Save configuration — merge over existing file so extra sections (tuning) survive
@@ -444,16 +528,19 @@ def post_config():
             "host": source["host"],
             "port": int(source["port"]),
             "user": source["user"],
-            "password": source["password"]
+            "password": source["password"],
+            "version": int(source.get("version", 4))
         },
         "target": {
             "host": target["host"],
             "port": int(target["port"]),
             "user": target["user"],
-            "password": target["password"]
+            "password": target["password"],
+            "version": int(target.get("version", 8))
         },
         "default_db": data.get("default_db", "prs")
     })
+
 
     # Optional numeric-comparison tuning from the Settings UI
     if "tuning" in data and isinstance(data["tuning"], dict):
@@ -518,16 +605,10 @@ def post_ignore_fields():
 @app.route("/api/databases", methods=["GET"])
 def get_databases():
     cfg = _load_config()
-    target = cfg.get("target", DEFAULT_CONFIG["target"])
+    target = _get_target_config(cfg)
     
     try:
-        t_conn = MySQLdb.connect(
-            host=target["host"],
-            port=int(target["port"]),
-            user=target["user"],
-            passwd=target["password"],
-            connect_timeout=3
-        )
+        t_conn = _connect_target(target, cfg.get("default_db", "prs"))
         cursor = t_conn.cursor()
         cursor.execute("SHOW DATABASES")
         dbs = [r[0] for r in cursor.fetchall()]
@@ -625,7 +706,7 @@ def random_compare():
 
         cfg = _load_config()
         src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
-        tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
+        tgt_cfg = _get_target_config(cfg)
 
         src_conn = MySQL40Connection(
             host=src_cfg["host"],
@@ -638,28 +719,14 @@ def random_compare():
         )
         tgt_conn = _connect_target(tgt_cfg, db)
 
-        # Get PK columns from target (information_schema)
-        tc = tgt_conn.cursor()
-        tc.execute("""
-            SELECT column_name FROM information_schema.key_column_usage
-            WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
-            ORDER BY ordinal_position
-        """, (db, table))
-        pk_cols = [r[0] for r in tc.fetchall()]
-        tc.close()
+        tgt_version = int(tgt_cfg.get("version", 8))
+        pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
 
         if not pk_cols:
             return jsonify({"error": f"Table '{table}' has no primary key"}), 400
 
-        # Get all column names from target
-        tc = tgt_conn.cursor()
-        tc.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s
-            ORDER BY ordinal_position
-        """, (db, table))
-        all_cols = [r[0] for r in tc.fetchall()]
-        tc.close()
+        all_cols = _get_tgt_all_cols(tgt_conn, tgt_version, db, table)
+
 
         # Also get source column names for intersection
         src_raw_cols = src_conn.query(f"SHOW COLUMNS FROM `{table}`")
@@ -999,7 +1066,7 @@ def table_timestamp_info():
         if win_end:   parts.append(f"`{col}` < '{win_end}'")
         return f" WHERE {' AND '.join(parts)}" if parts else ""
     src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
-    tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
+    tgt_cfg = _get_target_config(cfg)
 
     src_conn = None
     tgt_conn = None
@@ -1139,7 +1206,7 @@ def custom_query():
 
     cfg     = _load_config()
     src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
-    tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
+    tgt_cfg = _get_target_config(cfg)
 
     result = {}
 
@@ -1772,16 +1839,11 @@ def _sc_worker(sql: str, table: str, db: str):
         # ── Discover columns & PK ─────────────────────────────────────────────
         tgt_conn = _connect_target(tgt_cfg, db)
 
+        tgt_version = int(tgt_cfg.get("version", 8))
         pk_cols = []
         if table:
-            tc = tgt_conn.cursor()
-            tc.execute("""
-                SELECT column_name FROM information_schema.key_column_usage
-                WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
-                ORDER BY ordinal_position
-            """, (db, table))
-            pk_cols = [r[0] for r in tc.fetchall()]
-            tc.close()
+            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
+
 
         src_conn = MySQL40Connection(
             host=src_cfg["host"], port=int(src_cfg["port"]),
@@ -2128,17 +2190,11 @@ def sql_compare():
         if not common_cols:
             return jsonify({"error": "No common columns between source and target result sets"}), 400
 
-        # Auto-fetch PK from information_schema if table name given
+        tgt_version = int(tgt_cfg.get("version", 8))
         pk_cols = []
         if table:
-            tc = tgt_conn.cursor()
-            tc.execute("""
-                SELECT column_name FROM information_schema.key_column_usage
-                WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
-                ORDER BY ordinal_position
-            """, (db, table))
-            pk_cols = [r[0] for r in tc.fetchall()]
-            tc.close()
+            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
+
             missing_pk = [c for c in pk_cols if c not in set(common_cols)]
             if missing_pk:
                 return jsonify({"error": f"PK column(s) {missing_pk} not in SELECT result — add them to your query"}), 400
