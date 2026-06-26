@@ -686,6 +686,60 @@ def _keyset_cond(pk_cols: list[str], last_vals: tuple,
     return "(" + " OR ".join(ors) + ")"
 
 
+_PREFIX_BATCH = 50000  # rows per prefix-discovery page
+
+
+def _prefix_keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
+                           prefix_cols: list[str], ts_cond: str,
+                           chunk_size: int = KEYSET_CHUNK,
+                           pk_str_mask: list[bool] | None = None):
+    """Keyset stream partitioned by prefix columns.
+
+    Used when ts_col is not the leading PK column (e.g. PK=(share,timestamp,symboltypeid)).
+    Discovers distinct prefix values via keyset pagination (guaranteed O(distinct_values),
+    not O(total_rows)), then for each prefix pins those columns and does a normal keyset
+    stream — letting MySQL use the PK index for both the prefix equality seek AND the
+    timestamp range scan.
+
+    prefix_cols: pk_cols[:ts_col_idx] — the columns that appear before ts_col in PK.
+    ts_cond: bare WHERE condition (no WHERE keyword) for the timestamp window.
+    """
+    mask = pk_str_mask or [False] * len(pk_cols)
+    prefix_len = len(prefix_cols)
+    prefix_mask = mask[:prefix_len]
+
+    order_by = ", ".join(
+        f"BINARY `{c}`" if mask[i] else f"`{c}`"
+        for i, c in enumerate(prefix_cols)
+    )
+    col_list = ", ".join(f"`{c}`" for c in prefix_cols)
+
+    # Keyset-paginate over distinct prefix values — walks the B-tree index directly,
+    # guaranteed O(distinct_values) regardless of total row count.
+    last_prefix = None
+    while True:
+        seek_conds = []
+        if last_prefix is not None:
+            seek_conds.append(_keyset_cond(prefix_cols, last_prefix, prefix_mask))
+        where = f"WHERE {seek_conds[0]}" if seek_conds else ""
+        batch = fetch(
+            f"SELECT DISTINCT {col_list} FROM `{table}` {where} "
+            f"ORDER BY {order_by} LIMIT {_PREFIX_BATCH}"
+        )
+        if not batch:
+            break
+        for prow in batch:
+            conds = [f"`{prefix_cols[i]}` = {_sql_lit(prow[i])}" for i in range(prefix_len)]
+            if ts_cond:
+                conds.append(ts_cond)
+            full_cond = " AND ".join(conds)
+            yield from _keyset_stream(fetch, table, pk_cols, all_cols, full_cond,
+                                       chunk_size=chunk_size, pk_str_mask=pk_str_mask)
+        if len(batch) < _PREFIX_BATCH:
+            break
+        last_prefix = batch[-1]
+
+
 def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
                    base_cond: str, chunk_size: int = KEYSET_CHUNK,
                    pk_str_mask: list[bool] | None = None):
@@ -723,7 +777,8 @@ def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
 
 def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                      src, where: str, src_rows_est: int,
-                     window_label: str | None = None) -> dict:
+                     window_label: str | None = None,
+                     ts_col: str | None = None) -> dict:
     """Two-pointer merge on filtered rows. Returns result dict.
     Reuses the caller's src connection — MySQL 4 only allows 1 concurrent
     connection per user, so opening a second one blocks indefinitely.
@@ -791,10 +846,23 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
             for c in pk_cols
         ]
 
-        src_gen = _keyset_stream(src.query, table, pk_cols, all_cols, base_cond,
-                                 pk_str_mask=pk_str_mask)
-        tgt_gen = _keyset_stream(_tgt_fetch, table, pk_cols, all_cols, base_cond,
-                                 pk_str_mask=pk_str_mask)
+        # If ts_col is not the leading PK column and there is a window condition,
+        # use prefix-partitioned streaming: pin the columns before ts_col via
+        # DISTINCT lookup so MySQL can use the PK index for the timestamp range.
+        ts_col_idx = pk_cols.index(ts_col) if (ts_col and ts_col in pk_cols and base_cond) else -1
+        if ts_col_idx > 0:
+            prefix_cols = pk_cols[:ts_col_idx]
+            src_gen = _prefix_keyset_stream(src.query, table, pk_cols, all_cols,
+                                             prefix_cols, base_cond,
+                                             pk_str_mask=pk_str_mask)
+            tgt_gen = _prefix_keyset_stream(_tgt_fetch, table, pk_cols, all_cols,
+                                             prefix_cols, base_cond,
+                                             pk_str_mask=pk_str_mask)
+        else:
+            src_gen = _keyset_stream(src.query, table, pk_cols, all_cols, base_cond,
+                                     pk_str_mask=pk_str_mask)
+            tgt_gen = _keyset_stream(_tgt_fetch, table, pk_cols, all_cols, base_cond,
+                                     pk_str_mask=pk_str_mask)
 
         pk_n = len(pk_cols)
         col_idx = {col: i for i, col in enumerate(all_cols)}
@@ -1049,7 +1117,8 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
         where    = f"WHERE {window}" if window else ""
 
         result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est,
-                                 window_label=_window_label() if window else None)
+                                 window_label=_window_label() if window else None,
+                                 ts_col=ts_col)
 
         has_errors = (result["mismatches"] > 0 or
                       result["missing_in_tgt"] > 0 or

@@ -1789,6 +1789,19 @@ def _sc_worker(sql: str, table: str, db: str):
             database=db, timeout=3600, charset="tis620",
         )
         src_cols, _ = src_conn.query_with_cols(f"{strip_sql} LIMIT 1")
+        src_col_type_map = {}
+        _type_table = table
+        if not _type_table:
+            # No table selected — infer from SQL so BINARY is applied for string PKs
+            _m = _re.search(r'\bFROM\s+`?(\w+)`?', strip_sql, _re.IGNORECASE)
+            if _m:
+                _type_table = _m.group(1)
+        if _type_table:
+            try:
+                src_col_rows = src_conn.query(f"SHOW COLUMNS FROM `{_type_table}`")
+                src_col_type_map = {r[0]: r[1].lower() for r in src_col_rows}
+            except Exception:
+                pass
         src_conn.close(); src_conn = None
 
         tc = tgt_conn.cursor()
@@ -1819,7 +1832,15 @@ def _sc_worker(sql: str, table: str, db: str):
             _sc_emit({"type": "done", "exit_code": 1}); return
 
         # ── Build streaming SQL ───────────────────────────────────────────────
-        pk_order = ", ".join(f"`{c}`" for c in pk_cols)
+        _str_type_keywords = ("char", "text", "enum", "set", "varchar", "binary", "blob")
+        pk_str_mask = [
+            any(kw in src_col_type_map.get(c, "") for kw in _str_type_keywords)
+            for c in pk_cols
+        ]
+        pk_order = ", ".join(
+            f"BINARY `{c}`" if pk_str_mask[i] else f"`{c}`"
+            for i, c in enumerate(pk_cols)
+        )
         limit_clause = f" LIMIT {user_limit}" if user_limit else ""
         stream_sql = f"{strip_sql} ORDER BY {pk_order}{limit_clause}"
 
