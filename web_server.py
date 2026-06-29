@@ -1237,11 +1237,14 @@ def custom_query():
             exec_sql = sql
             if sql_upper.startswith("SELECT") and "LIMIT" not in sql_upper:
                 exec_sql = f"{sql} LIMIT {row_limit}"
-            tc = tgt_conn.cursor()
-            tc.execute(exec_sql)
-            columns  = [d[0] for d in tc.description] if tc.description else []
-            rows_raw = tc.fetchall()
-            tc.close()
+            if int(tgt_cfg.get("version", 8)) == 4:
+                columns, rows_raw = tgt_conn.query_with_cols(exec_sql)
+            else:
+                tc = tgt_conn.cursor()
+                tc.execute(exec_sql)
+                columns  = [d[0] for d in tc.description] if tc.description else []
+                rows_raw = tc.fetchall()
+                tc.close()
             tgt_conn.close()
             result["target"] = {
                 "columns": columns,
@@ -1878,10 +1881,13 @@ def _sc_worker(sql: str, table: str, db: str):
                 pass
         src_conn.close(); src_conn = None
 
-        tc = tgt_conn.cursor()
-        tc.execute(f"{strip_sql} LIMIT 1")
-        tgt_cols = [d[0] for d in tc.description] if tc.description else []
-        tc.close()
+        if tgt_version == 4:
+            tgt_cols, _ = tgt_conn.query_with_cols(f"{strip_sql} LIMIT 1")
+        else:
+            tc = tgt_conn.cursor()
+            tc.execute(f"{strip_sql} LIMIT 1")
+            tgt_cols = [d[0] for d in tc.description] if tc.description else []
+            tc.close()
 
         tgt_col_set = set(tgt_cols)
         common_cols = [c for c in src_cols if c in tgt_col_set]
@@ -1928,10 +1934,14 @@ def _sc_worker(sql: str, table: str, db: str):
             database=db, timeout=3600, charset="tis620",
         )
 
-        tc_setup = tgt_conn.cursor()
-        tc_setup.execute("SET SESSION net_write_timeout=3600")
-        tc_setup.execute("SET SESSION net_read_timeout=3600")
-        tc_setup.close()
+        if tgt_version != 4:
+            tc_setup = tgt_conn.cursor()
+            try:
+                tc_setup.execute("SET SESSION net_write_timeout=3600")
+                tc_setup.execute("SET SESSION net_read_timeout=3600")
+            except Exception:
+                pass
+            tc_setup.close()
 
         src_idx = {c: i for i, c in enumerate(src_cols)}
         tgt_idx = {c: i for i, c in enumerate(tgt_cols)}
@@ -1961,7 +1971,7 @@ def _sc_worker(sql: str, table: str, db: str):
 
         src_gen = src_conn.query_stream(stream_sql)
 
-        tgt_cur = tgt_conn.cursor(MySQLdb.cursors.SSCursor)
+        tgt_cur = tgt_conn.cursor() if tgt_version == 4 else tgt_conn.cursor(MySQLdb.cursors.SSCursor)
         tgt_cur.execute(stream_sql)
         def tgt_gen():
             while not _sc_stop.is_set():
@@ -2191,18 +2201,20 @@ def sql_compare():
 
         src_cols, src_rows_raw = src_conn.query_with_cols(exec_sql)
 
-        tc = tgt_conn.cursor()
-        tc.execute(exec_sql)
-        tgt_cols = [d[0] for d in tc.description] if tc.description else []
-        tgt_rows_raw = tc.fetchall()
-        tc.close()
+        tgt_version = int(tgt_cfg.get("version", 8))
+        if tgt_version == 4:
+            tgt_cols, tgt_rows_raw = tgt_conn.query_with_cols(exec_sql)
+        else:
+            tc = tgt_conn.cursor()
+            tc.execute(exec_sql)
+            tgt_cols = [d[0] for d in tc.description] if tc.description else []
+            tgt_rows_raw = tc.fetchall()
+            tc.close()
 
         tgt_col_set = set(tgt_cols)
         common_cols = [c for c in src_cols if c in tgt_col_set]
         if not common_cols:
             return jsonify({"error": "No common columns between source and target result sets"}), 400
-
-        tgt_version = int(tgt_cfg.get("version", 8))
         pk_cols = []
         if table:
             pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
