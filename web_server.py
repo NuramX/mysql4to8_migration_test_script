@@ -120,6 +120,11 @@ def _reader_thread(proc: subprocess.Popen, target_name: str | None = None):
         if target_name:
             try:
                 ev = json.loads(text)
+                # In multi-target mode the subprocess emits its own {"type":"done"} —
+                # suppress it so the SSE stream stays open for the next target.
+                # The chaining logic emits the real "done" after all targets finish.
+                if ev.get("type") == "done":
+                    continue
                 ev["target_name"] = target_name
                 text = json.dumps(ev, ensure_ascii=False)
             except Exception:
@@ -138,6 +143,7 @@ def _reader_thread(proc: subprocess.Popen, target_name: str | None = None):
         global _process
         if _pending_runs:
             next_cmd, next_tname = _pending_runs.pop(0)
+            print(f"[chain] starting target run: {next_tname}", flush=True)
             _process = subprocess.Popen(
                 next_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 cwd=os.path.dirname(os.path.abspath(__file__))
@@ -513,88 +519,89 @@ def get_config():
 def post_config():
     data = request.json or {}
     source = data.get("source", {})
-    target = data.get("target", {})
-    
-    # Validation
+
+    # Accept targets[] (new multi-target format) or legacy single target{}
+    raw_targets = data.get("targets") or ([data["target"]] if data.get("target") else [])
+    if not raw_targets:
+        return jsonify({"error": "At least one target database is required"}), 400
+
+    # Validate source fields
     for k in ["host", "port", "user", "password"]:
-        if k not in source or k not in target:
-            return jsonify({"error": f"Missing field '{k}' in configuration"}), 400
-    
-    # Test target connection
-    try:
-        if int(target.get("version", 8)) == 4:
-            from mysql40 import MySQL40Connection
-            t_conn = MySQL40Connection(
-                host=target["host"],
-                port=int(target["port"]),
-                user=target["user"],
-                password=target["password"],
-                database=data.get("default_db", "prs"),
-                timeout=10
-            )
-            t_conn.close()
-        else:
-            t_conn = MySQLdb.connect(
-                host=target["host"],
-                port=int(target["port"]),
-                user=target["user"],
-                passwd=target["password"],
-                connect_timeout=10
-            )
-            t_conn.close()
-    except Exception as e:
-        import socket as _sock
-        if isinstance(e, _sock.timeout):
-            return jsonify({"error": f"Target DB Connection Error: connection timed out ({target.get('host')}:{target.get('port')})"}), 400
-        return jsonify({"error": f"Target DB Connection Error: {str(e)}"}), 400
+        if k not in source:
+            return jsonify({"error": f"Missing field '{k}' in source configuration"}), 400
+
+    # Validate & test each target connection
+    import socket as _sock
+    clean_targets = []
+    for tgt in raw_targets:
+        for k in ["host", "port", "user", "password"]:
+            if k not in tgt:
+                name = tgt.get("name", tgt.get("host", "?"))
+                return jsonify({"error": f"Missing field '{k}' in target '{name}'"}), 400
+        try:
+            if int(tgt.get("version", 8)) == 4:
+                from mysql40 import MySQL40Connection
+                t_conn = MySQL40Connection(
+                    host=tgt["host"], port=int(tgt["port"]),
+                    user=tgt["user"], password=tgt["password"],
+                    database=data.get("default_db", "prs"), timeout=10
+                )
+                t_conn.close()
+            else:
+                t_conn = MySQLdb.connect(
+                    host=tgt["host"], port=int(tgt["port"]),
+                    user=tgt["user"], passwd=tgt["password"],
+                    connect_timeout=10
+                )
+                t_conn.close()
+        except Exception as e:
+            label = tgt.get("name") or f"{tgt.get('host')}:{tgt.get('port')}"
+            if isinstance(e, _sock.timeout):
+                return jsonify({"error": f"Target '{label}' connection timed out"}), 400
+            return jsonify({"error": f"Target '{label}' connection error: {str(e)}"}), 400
+        clean_targets.append({
+            "name": tgt.get("name", ""),
+            "host": tgt["host"], "port": int(tgt["port"]),
+            "user": tgt["user"], "password": tgt["password"],
+            "version": int(tgt.get("version", 8))
+        })
 
     # Test source connection
     try:
         from mysql40 import MySQL40Connection
         s_conn = MySQL40Connection(
-            host=source["host"],
-            port=int(source["port"]),
-            user=source["user"],
-            password=source["password"],
-            database=data.get("default_db", "prs"),
-            timeout=10
+            host=source["host"], port=int(source["port"]),
+            user=source["user"], password=source["password"],
+            database=data.get("default_db", "prs"), timeout=10
         )
         s_conn.close()
     except Exception as e:
-        import socket as _sock
         if isinstance(e, _sock.timeout):
-            return jsonify({"error": f"Source DB Connection Error: connection timed out ({source.get('host')}:{source.get('port')})"}), 400
-        return jsonify({"error": f"Source DB Connection Error: {str(e)}"}), 400
+            return jsonify({"error": f"Source DB connection timed out ({source.get('host')}:{source.get('port')})"}), 400
+        return jsonify({"error": f"Source DB connection error: {str(e)}"}), 400
 
-    # Save configuration — merge over existing file so extra sections (tuning) survive
+    # Save — merge over existing file so extra sections survive
     cfg = _load_config()
     cfg.update({
         "source": {
-            "host": source["host"],
-            "port": int(source["port"]),
-            "user": source["user"],
-            "password": source["password"],
+            "host": source["host"], "port": int(source["port"]),
+            "user": source["user"], "password": source["password"],
             "version": int(source.get("version", 4))
         },
-        "target": {
-            "host": target["host"],
-            "port": int(target["port"]),
-            "user": target["user"],
-            "password": target["password"],
-            "version": int(target.get("version", 8))
-        },
+        "targets": clean_targets,
+        # Keep legacy `target` key pointing at first entry for backward compat
+        "target": clean_targets[0],
         "default_db": data.get("default_db", "prs")
     })
 
-
-    # Optional numeric-comparison tuning from the Settings UI
+    # Optional numeric-comparison tuning
     if "tuning" in data and isinstance(data["tuning"], dict):
         tuning = cfg.setdefault("tuning", {})
         t_in = data["tuning"]
         if "decimal_round" in t_in:
             dr = t_in["decimal_round"]
             if dr is None or str(dr).strip() == "":
-                tuning.pop("decimal_round", None)   # blank = off, fall back to tolerance
+                tuning.pop("decimal_round", None)
             else:
                 try:
                     tuning["decimal_round"] = max(0, int(dr))
