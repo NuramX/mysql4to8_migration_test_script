@@ -2794,7 +2794,7 @@
       drawer.classList.add('active');
 
       if (d.checks && d.checks.full_sync) {
-        setTimeout(() => { atFcInit(table); atExpInit(table); }, 150);
+        setTimeout(() => { atFcInit(table, atKeyTarget(atOpenTable)); atExpInit(table, atKeyTarget(atOpenTable)); }, 150);
       }
 
       atLoadTsInfo(table, activeDatabase, d.pk_cols || []);
@@ -3789,6 +3789,7 @@
 
     const atFcState = {
       table: null,
+      targetName: null,
       currentPage: 0,
       pageSize: 50,
       filterType: 'all',
@@ -3827,8 +3828,9 @@
   `;
     }
 
-    function atFcInit(tableName) {
+    function atFcInit(tableName, targetName) {
       atFcState.table = tableName;
+      atFcState.targetName = targetName || null;
       atFcState.currentPage = 0;
       atFcState.filterType = 'all';
       atFcState.loading = false;
@@ -3882,7 +3884,7 @@
         const resp = await fetch('/api/reports/full-compare/paged', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ table, page, page_size: atFcState.pageSize, filter_type: atFcState.filterType }),
+          body: JSON.stringify({ table, target_name: atFcState.targetName || '', page, page_size: atFcState.pageSize, filter_type: atFcState.filterType }),
         });
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
@@ -4019,6 +4021,7 @@
 
     const atExpState = {
       table: null,
+      targetName: null,
       currentPage: 0,
       pageSize: 50,
       filterType: 'all',
@@ -4047,10 +4050,10 @@
           <span id="at-exp-total-badge" style="font-size:10px; color:var(--muted);"></span>
         </div>
         <div class="rc-controls" style="display:flex; gap:6px;">
-          <button onclick="atExpDownloadCsv('${table}')" class="rc-btn" style="background:rgba(248,81,73,0.1); border-color:var(--fail); color:var(--fail); font-size:11px; padding:6px 12px; border-radius:4px;">
+          <button onclick="atExpDownloadCsv('${table}','${d._target||''}')" class="rc-btn" style="background:rgba(248,81,73,0.1); border-color:var(--fail); color:var(--fail); font-size:11px; padding:6px 12px; border-radius:4px;">
             <span style="margin-right:4px;">📊</span>Excel (.xlsx)
           </button>
-          <button onclick="atExpDownloadRawCsv('${table}')" class="rc-btn" style="background:rgba(139,148,158,0.1); border-color:var(--muted); color:var(--muted); font-size:11px; padding:6px 12px; border-radius:4px;">
+          <button onclick="atExpDownloadRawCsv('${table}','${d._target||''}')" class="rc-btn" style="background:rgba(139,148,158,0.1); border-color:var(--muted); color:var(--muted); font-size:11px; padding:6px 12px; border-radius:4px;">
             <span style="margin-right:4px;">📄</span>CSV (raw)
           </button>
         </div>
@@ -4078,8 +4081,9 @@
   `;
     }
 
-    function atExpInit(tableName) {
+    function atExpInit(tableName, targetName) {
       atExpState.table = tableName;
+      atExpState.targetName = targetName || null;
       atExpState.currentPage = 0;
       atExpState.filterType = 'all';
       atExpState.currentSamples = [];
@@ -4125,6 +4129,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             table,
+            target_name: atExpState.targetName || '',
             page,
             page_size: atExpState.pageSize,
             filter_type: atExpState.filterType,
@@ -4244,17 +4249,20 @@
       });
     }
 
-    function atExpDownloadCsv(table) {
+    function atExpDownloadCsv(table, targetName) {
       const a = document.createElement('a');
-      a.href = `/api/reports/download-excel/${table}`;
-      a.download = `${table}_discrepancies.xlsx`;
+      const tParam = targetName ? `?target=${encodeURIComponent(targetName)}` : '';
+      a.href = `/api/reports/download-excel/${table}${tParam}`;
+      const sfx = targetName ? `_${targetName}` : '';
+      a.download = `${table}${sfx}_discrepancies.xlsx`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
     }
 
-    function atExpDownloadRawCsv(table) {
+    function atExpDownloadRawCsv(table, targetName) {
       const a = document.createElement('a');
-      a.href = `/static/reports/${table}_mismatches.csv`;
-      a.download = `${table}_mismatches.csv`;
+      const sfx = targetName ? `_${targetName}` : '';
+      a.href = `/static/reports/${table}${sfx}_mismatches.csv`;
+      a.download = `${table}${sfx}_mismatches.csv`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
     }
 

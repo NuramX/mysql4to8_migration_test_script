@@ -309,7 +309,7 @@ def _connect_target(db: str):
             user=TARGET_CFG["user"],
             password=TARGET_CFG["password"],
             database=db,
-            timeout=30,
+            timeout=SRC_TIMEOUT,
             charset="tis620",
         )
 
@@ -855,8 +855,9 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
 
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
     os.makedirs(reports_dir, exist_ok=True)
-    csv_path  = os.path.join(reports_dir, f"{table}_mismatches.csv")
-    ndjson_path = os.path.join(reports_dir, f"{table}_full_compare.ndjson")
+    _tname_sfx = f"_{TARGET_CFG.get('name')}" if TARGET_CFG.get("name") else ""
+    csv_path  = os.path.join(reports_dir, f"{table}{_tname_sfx}_mismatches.csv")
+    ndjson_path = os.path.join(reports_dir, f"{table}{_tname_sfx}_full_compare.ndjson")
     csv_file = None
     csv_writer = None
     ndjson_file = None
@@ -1145,7 +1146,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
             "window": window_label,
         }
         try:
-            meta_path = os.path.join(reports_dir, f"{table}_compare_meta.json")
+            meta_path = os.path.join(reports_dir, f"{table}{_tname_sfx}_compare_meta.json")
             with open(meta_path, "w", encoding="utf-8") as mf:
                 json.dump(meta, mf)
         except Exception:

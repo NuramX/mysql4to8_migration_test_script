@@ -1306,9 +1306,10 @@ def custom_query():
     return jsonify(result)
 
 
-def _read_compare_meta(table, reports_dir):
+def _read_compare_meta(table, reports_dir, target_name=None):
     """Read sidecar meta JSON for fast type_counts. Returns None if missing."""
-    meta_path = os.path.join(reports_dir, f"{table}_compare_meta.json")
+    sfx = f"_{target_name}" if target_name else ""
+    meta_path = os.path.join(reports_dir, f"{table}{sfx}_compare_meta.json")
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -1382,6 +1383,7 @@ def get_discrepancies_paged():
     """
     data = request.json or {}
     table = data.get("table")
+    target_name = data.get("target_name") or ""
     page = int(data.get("page", 0))
     page_size = max(1, int(data.get("page_size", 50)))
     filter_type = data.get("filter_type", "all").lower()
@@ -1390,14 +1392,15 @@ def get_discrepancies_paged():
         return jsonify({"error": "Missing 'table'"}), 400
 
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
-    csv_path = os.path.join(reports_dir, f"{table}_mismatches.csv")
+    _sfx = f"_{target_name}" if target_name else ""
+    csv_path = os.path.join(reports_dir, f"{table}{_sfx}_mismatches.csv")
     if not os.path.exists(csv_path):
         return jsonify({"table": table, "total": 0, "total_pages": 0, "page": 0,
                         "type_counts": {"all": 0, "mismatch": 0, "missing": 0, "extra": 0},
                         "samples": []})
 
     try:
-        meta = _read_compare_meta(table, reports_dir)
+        meta = _read_compare_meta(table, reports_dir, target_name=target_name or None)
         if meta:
             disc_counts = {
                 "all":      meta.get("mismatch", 0) + meta.get("missing", 0) + meta.get("extra", 0),
@@ -1451,12 +1454,13 @@ _full_compare_cache = {}  # table -> {type_counts, mtime}
 def get_full_compare_paged():
     """
     Server-side paginated full comparison (match + mismatch + missing + extra).
-    Accepts: { table, page, page_size, filter_type }
+    Accepts: { table, target_name, page, page_size, filter_type }
     Returns: { total, total_pages, page, type_counts, samples: [...] }
-    Reads from {table}_full_compare.ndjson written by _stream_compare.
+    Reads from {table}[_{target_name}]_full_compare.ndjson written by _stream_compare.
     """
     data = request.json or {}
     table = data.get("table")
+    target_name = data.get("target_name") or ""
     page = int(data.get("page", 0))
     page_size = max(1, int(data.get("page_size", 50)))
     filter_type = data.get("filter_type", "all").lower()
@@ -1464,7 +1468,9 @@ def get_full_compare_paged():
     if not table:
         return jsonify({"error": "Missing 'table'"}), 400
 
-    ndjson_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports", f"{table}_full_compare.ndjson")
+    _sfx = f"_{target_name}" if target_name else ""
+    _cache_key = f"{table}{_sfx}"
+    ndjson_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports", f"{table}{_sfx}_full_compare.ndjson")
     if not os.path.exists(ndjson_path):
         return jsonify({"table": table, "total": 0, "total_pages": 0, "page": 0,
                         "type_counts": {"all": 0, "match": 0, "mismatch": 0, "missing": 0, "extra": 0},
@@ -1472,10 +1478,10 @@ def get_full_compare_paged():
 
     try:
         mtime = os.path.getmtime(ndjson_path)
-        cache = _full_compare_cache.get(table)
+        cache = _full_compare_cache.get(_cache_key)
         if not cache or cache["mtime"] != mtime:
             reports_dir_fc = os.path.dirname(ndjson_path)
-            meta = _read_compare_meta(table, reports_dir_fc)
+            meta = _read_compare_meta(table, reports_dir_fc, target_name=target_name or None)
             if meta:
                 tc = meta
             else:
@@ -1497,8 +1503,8 @@ def get_full_compare_paged():
                         rtype = line[idx:end]
                         tc["all"] += 1
                         tc[rtype] = tc.get(rtype, 0) + 1
-            _full_compare_cache[table] = {"type_counts": tc, "mtime": mtime}
-            cache = _full_compare_cache[table]
+            _full_compare_cache[_cache_key] = {"type_counts": tc, "mtime": mtime}
+            cache = _full_compare_cache[_cache_key]
 
         type_counts = cache["type_counts"]
         _DISCREPANCY = {"mismatch", "missing", "extra"}
@@ -1573,12 +1579,14 @@ def download_excel(table):
     import xlsxwriter
     from flask import send_file
 
+    target_name = request.args.get("target", "") or ""
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
-    csv_path = os.path.join(reports_dir, f"{table}_mismatches.csv")
+    _sfx = f"_{target_name}" if target_name else ""
+    csv_path = os.path.join(reports_dir, f"{table}{_sfx}_mismatches.csv")
     if not os.path.exists(csv_path):
         return jsonify({"error": "Report not found"}), 404
 
-    meta = _read_compare_meta(table, reports_dir) or {}
+    meta = _read_compare_meta(table, reports_dir, target_name=target_name or None) or {}
 
     # ── Pass 1: discover PK columns + collect all grouped data ───────────
     pk_cols = []
