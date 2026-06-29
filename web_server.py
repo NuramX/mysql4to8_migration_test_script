@@ -1588,6 +1588,25 @@ def download_excel(table):
 
     meta = _read_compare_meta(table, reports_dir, target_name=target_name or None) or {}
 
+    cfg = _load_config()
+    src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
+    tgt_cfg = None
+    if target_name:
+        for t in cfg.get("targets", []):
+            if t.get("name") == target_name:
+                tgt_cfg = t
+                break
+    if not tgt_cfg:
+        tgt_cfg = _get_target_config(cfg)
+
+    src_host = src_cfg.get("host", "unknown")
+    src_ver = src_cfg.get("version", 4)
+    tgt_host = tgt_cfg.get("host", "unknown")
+    tgt_ver = tgt_cfg.get("version", 8)
+
+    src_label = f"Source ({src_host}, MySQL {src_ver})"
+    tgt_label = f"Target ({tgt_host}, MySQL {tgt_ver})"
+
     # ── Pass 1: discover PK columns + collect all grouped data ───────────
     pk_cols = []
     mm_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
@@ -1693,7 +1712,7 @@ def download_excel(table):
     pk_w  = [max(14, len(c)+2) for c in pk_cols]
     ws2   = wb.add_worksheet("🔴 Mismatch")
     ws2.hide_gridlines(2); ws2.freeze_panes(1, 0)
-    hdr2  = ["#"] + pk_cols + ["Column Name", "Source (MySQL 4)", "Target (MySQL 8)"]
+    hdr2  = ["#"] + pk_cols + ["Column Name", src_label, tgt_label]
     ws2.write_row(0, 0, hdr2, HDR); ws2.set_row(0, 24)
     ws2.set_column(0, 0, 6)
     for ci, w in enumerate(pk_w): ws2.set_column(ci+1, ci+1, min(w, 36))
@@ -1735,7 +1754,7 @@ def download_excel(table):
         ws3.write(i+1, 0, i+1, NUM)
         for ci, c in enumerate(pk_cols):
             ws3.write(i+1, ci+1, pk_dict.get(c, ""), PK)
-        ws3.write(i+1, pk_n+1, "มีใน Source (MySQL 4) แต่ไม่มีใน Target (MySQL 8)", NOTE)
+        ws3.write(i+1, pk_n+1, f"มีใน {src_label} แต่ไม่มีใน {tgt_label}", NOTE)
 
     # ── Sheet 4: Extra ───────────────────────────────────────────────────
     ws4 = wb.add_worksheet("🔵 Extra")
@@ -1749,7 +1768,7 @@ def download_excel(table):
         ws4.write(i+1, 0, i+1, NUM)
         for ci, c in enumerate(pk_cols):
             ws4.write(i+1, ci+1, pk_dict.get(c, ""), PK)
-        ws4.write(i+1, pk_n+1, "ไม่มีใน Source (MySQL 4) แต่มีใน Target (MySQL 8)", NOTE)
+        ws4.write(i+1, pk_n+1, f"ไม่มีใน {src_label} แต่มีใน {tgt_label}", NOTE)
 
     wb.close()
     buf.seek(0)
