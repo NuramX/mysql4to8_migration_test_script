@@ -3,15 +3,35 @@
     "host": "SOURCE_DB_HOST",
     "port": 3306,
     "user": "YOUR_USER",
-    "password": "YOUR_PASSWORD"
+    "password": "YOUR_PASSWORD",
+    "version": 4
   },
+  "targets": [
+    {
+      "name": "target_mysql8",
+      "host": "TARGET_DB_HOST",
+      "port": 3306,
+      "user": "YOUR_USER",
+      "password": "YOUR_PASSWORD",
+      "version": 8
+    },
+    {
+      "name": "target_mysql4",
+      "host": "ANOTHER_TARGET_HOST",
+      "port": 3306,
+      "user": "YOUR_USER",
+      "password": "YOUR_PASSWORD",
+      "version": 4
+    }
+  ],
   "target": {
     "host": "TARGET_DB_HOST",
     "port": 3306,
     "user": "YOUR_USER",
-    "password": "YOUR_PASSWORD"
+    "password": "YOUR_PASSWORD",
+    "version": 8
   },
-  "default_db": "technical",
+  "default_db": "your_database",
   "tuning": {
     "data_window_years": 2,
     "workers": 8,
@@ -20,5 +40,10 @@
     "decimal_tol": "0.0001",
     "decimal_round": null,
     "hash_chunks": 100
+  },
+  "ignore_fields": {
+    "your_database": {
+      "some_table": ["updated_at", "modified_by"]
+    }
   }
 }
