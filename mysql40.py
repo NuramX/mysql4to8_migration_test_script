@@ -41,17 +41,28 @@ def _scramble_old(password: str, seed: str) -> bytes:
 
 
 def _read_packet(sock: socket.socket) -> bytes:
-    header = b''
-    while len(header) < 4:
-        header += sock.recv(4 - len(header))
-    length = struct.unpack_from('<I', header[:3] + b'\x00')[0]
-    data = b''
-    while len(data) < length:
-        chunk = sock.recv(length - len(data))
-        if not chunk:
+    # Read 4-byte header into a pre-allocated buffer (avoids O(n²) b+=chunk).
+    hdr = bytearray(4)
+    hv = memoryview(hdr)
+    pos = 0
+    while pos < 4:
+        n = sock.recv_into(hv[pos:])
+        if not n:
             raise ConnectionError("Connection closed by server")
-        data += chunk
-    return data
+        pos += n
+    length = struct.unpack_from('<I', hdr[:3] + b'\x00')[0]
+    if length == 0:
+        return b''
+    # Read payload directly into a pre-allocated buffer.
+    data = bytearray(length)
+    dv = memoryview(data)
+    pos = 0
+    while pos < length:
+        n = sock.recv_into(dv[pos:])
+        if not n:
+            raise ConnectionError("Connection closed by server")
+        pos += n
+    return bytes(data)
 
 
 def _send_packet(sock: socket.socket, data: bytes, seq: int) -> None:

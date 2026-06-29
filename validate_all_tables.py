@@ -841,11 +841,16 @@ def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
 def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                      src, where: str, src_rows_est: int,
                      window_label: str | None = None,
-                     ts_col: str | None = None) -> dict:
+                     ts_col: str | None = None,
+                     tgt_conn=None) -> dict:
     """Two-pointer merge on filtered rows. Returns result dict.
-    Reuses the caller's src connection — MySQL 4 only allows 1 concurrent
-    connection per user, so opening a second one blocks indefinitely.
-    Opens a fresh tgt connection for the target side.
+
+    Accepts an optional `tgt_conn` so the caller can pass the connection it
+    already has open — this avoids opening a redundant 3rd concurrent
+    connection to MySQL 4, which blocks when max_user_connections is limited.
+    When `tgt_conn` is None a fresh target connection is opened here and
+    closed in the finally block; when provided the caller owns its lifecycle.
+
     Both sides are read with keyset pagination (ORDER BY pk LIMIT N per page)
     so neither DB filesorts the whole set to its tmpdir.
     Also appends all discrepancies to a dynamic local CSV report.
@@ -878,18 +883,52 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
     # seek boundary on each page.
     base_cond = where[6:].strip() if where[:5].upper() == "WHERE" else where
 
-    tgt_conn = _connect_target(DATABASE)
+    # Reuse the caller's tgt connection if provided (avoids a 3rd concurrent
+    # connection to MySQL 4 which blocks when max_user_connections is limited).
+    _owns_tgt = tgt_conn is None
 
-    try:
-        setup = tgt_conn.cursor()
+    if TARGET_CFG.get("version") == 4:
+        # ── MySQL 4 target: fresh-connection-per-chunk fetch functions ──────────
+        # Python generators are single-threaded: src chunk is fetched, connection
+        # closed, then tgt chunk is fetched, connection closed.  This guarantees
+        # we never hold two MySQL 4 connections open simultaneously.
+        def _src_fetch(sql):
+            c = _connect_source(DATABASE)
+            try:
+                return c.query(sql)
+            finally:
+                c.close()
+
+        def _tgt_fetch(sql):
+            c = _connect_target(DATABASE)
+            try:
+                cur = c.cursor()
+                cur.execute(sql)
+                result = cur.fetchall()
+                cur.close()
+                return result
+            finally:
+                c.close()
+
+        # No BINARY for 4vs4: same charset/collation on both sides, and BINARY
+        # prevents MySQL 4 from using the B-tree PK index (see comment below).
+        pk_str_mask = [False] * len(pk_cols)
+    else:
+        # ── Normal mode: use persistent tgt_conn (MySQL 8 target) ─────────────
+        if _owns_tgt:
+            tgt_conn = _connect_target(DATABASE)
+
         try:
-            setup.execute("SET SESSION net_write_timeout = 3600")
-            setup.execute("SET SESSION net_read_timeout  = 3600")
-            setup.execute("SET SESSION sort_buffer_size = 268435456")
+            setup = tgt_conn.cursor()
+            try:
+                setup.execute("SET SESSION net_write_timeout = 3600")
+                setup.execute("SET SESSION net_read_timeout  = 3600")
+                setup.execute("SET SESSION sort_buffer_size = 268435456")
+            except Exception:
+                pass
+            setup.close()
         except Exception:
             pass
-        setup.close()
-
 
         def _tgt_fetch(sql):
             cur = tgt_conn.cursor()
@@ -913,21 +952,24 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
             any(kw in src_col_type_map.get(c, "") for kw in _str_type_keywords)
             for c in pk_cols
         ]
+        def _src_fetch(sql):
+            return src.query(sql)
 
+    try:
         # If ts_col is not the leading PK column and there is a window condition,
         # use prefix-partitioned streaming: pin the columns before ts_col via
         # DISTINCT lookup so MySQL can use the PK index for the timestamp range.
         ts_col_idx = pk_cols.index(ts_col) if (ts_col and ts_col in pk_cols and base_cond) else -1
         if ts_col_idx > 0:
             prefix_cols = pk_cols[:ts_col_idx]
-            src_gen = _prefix_keyset_stream(src.query, table, pk_cols, all_cols,
+            src_gen = _prefix_keyset_stream(_src_fetch, table, pk_cols, all_cols,
                                              prefix_cols, base_cond,
                                              pk_str_mask=pk_str_mask)
             tgt_gen = _prefix_keyset_stream(_tgt_fetch, table, pk_cols, all_cols,
                                              prefix_cols, base_cond,
                                              pk_str_mask=pk_str_mask)
         else:
-            src_gen = _keyset_stream(src.query, table, pk_cols, all_cols, base_cond,
+            src_gen = _keyset_stream(_src_fetch, table, pk_cols, all_cols, base_cond,
                                      pk_str_mask=pk_str_mask)
             tgt_gen = _keyset_stream(_tgt_fetch, table, pk_cols, all_cols, base_cond,
                                      pk_str_mask=pk_str_mask)
@@ -1164,8 +1206,10 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
         if ndjson_file:
             try: ndjson_file.close()
             except: pass
-        try: tgt_conn.close()
-        except Exception: pass
+        # Only close tgt_conn if we opened it; caller manages its own connection.
+        if _owns_tgt:
+            try: tgt_conn.close()
+            except Exception: pass
 
 
 def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
@@ -1186,7 +1230,8 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
 
         result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est,
                                  window_label=_window_label() if window else None,
-                                 ts_col=ts_col)
+                                 ts_col=ts_col,
+                                 tgt_conn=tgt)
 
         has_errors = (result["mismatches"] > 0 or
                       result["missing_in_tgt"] > 0 or
@@ -1224,6 +1269,75 @@ def _process_table(table: str, src_cache: dict,
     has_pk  = bool(pk_cols)
     ts_col  = _window_ts_col(entry)   # None → no window, check full table
 
+    if TARGET_CFG.get("version") == 4:
+        # ── Sequential mode for MySQL 4 target ──────────────────────────────
+        # Never hold src and tgt connections open at the same time; MySQL 4
+        # enforces per-user connection limits and the 2nd connection blocks
+        # indefinitely when the 1st is still active on the same server/user.
+        cond = _window_cond(ts_col)
+
+        # Phase 1: source row count
+        src = _connect_source(DATABASE)
+        src_rows = 0
+        try:
+            src_rows = _src_row_count(src, table, cond)
+        except Exception:
+            pass
+        finally:
+            src.close()
+
+        _emit_table_start(table, src_rows, has_pk, pk_cols)
+
+        if SYNC_ONLY_MODE:
+            if has_pk:
+                check_full_sync(table, pk_cols, all_cols, None, None, src_rows, ts_col)
+            else:
+                _emit(table, "full_sync", "Full Field Sync", SKIP,
+                      {"summary": "no primary key"})
+            return
+
+        # Phase 2: target row count
+        tgt_rows = 0
+        tgt = _connect_target(DATABASE)
+        try:
+            tgt_rows = _tgt_row_count(tgt, table, cond)
+        except Exception:
+            pass
+        finally:
+            tgt.close()
+
+        # Emit row count result
+        diff = src_rows - tgt_rows
+        status = PASS if src_rows == tgt_rows else FAIL
+        win_note = f"  (window: `{ts_col}` {_window_label()})" if cond else ""
+        _emit(table, "row_count", "Row Count", status, {
+            "summary": f"source={src_rows:,}  target={tgt_rows:,}  diff={diff:+,}{win_note}",
+            "source": src_rows, "target": tgt_rows, "diff": diff,
+            "window": _window_label() if cond else None,
+        })
+        actual = src_rows
+
+        # Schema and index checks use the pre-fetched caches — no connection needed
+        check_schema(table, None, None,
+                     src_cache=src_cache,
+                     tgt_col_cache=tgt_col_cache.get(table))
+        check_indexes(table, None, None,
+                      src_cache=src_cache,
+                      tgt_idx_cache=tgt_idx_cache.get(table))
+
+        if has_pk:
+            # dup_pk: instant PASS (enforced by DB constraint), no connection needed
+            check_duplicate_pk(table, pk_cols, None, None, actual)
+            # Phase 3: full sync with fresh-per-chunk connections
+            check_full_sync(table, pk_cols, all_cols, None, None, actual, ts_col)
+        else:
+            _emit(table, "dup_pk",    "Duplicate PK",    SKIP,
+                  {"summary": "no primary key"})
+            _emit(table, "full_sync", "Full Field Sync", SKIP,
+                  {"summary": "no primary key"})
+        return
+
+    # ── Normal mode (target is MySQL 8 or non-MySQL-4) ───────────────────────
     # Count(*) still needs a live connection — fast for MyISAM
     src = _connect_source(DATABASE)
     tgt = _connect_target(DATABASE)
@@ -1266,28 +1380,55 @@ def _process_table(table: str, src_cache: dict,
 
 
 def main():
-    src = _connect_source(DATABASE)
-    tgt = _connect_target(DATABASE)
+    if TARGET_CFG.get("version") == 4:
+        # ── Sequential connection mode for MySQL 4 target ─────────────────────
+        # Never hold src and tgt connections open at the same time; MySQL 4
+        # blocks the 2nd connection when max_user_connections is hit.
+        # Phase A: source table list
+        src = _connect_source(DATABASE)
+        src_table_set = set(_src_tables(src))
+        src.close()
 
-    src_table_set = set(_src_tables(src))
-    tgt_table_set = set(_tgt_tables(tgt))
-    only_src = sorted(src_table_set - tgt_table_set)
-    only_tgt = sorted(tgt_table_set - src_table_set)
-    common   = sorted(src_table_set & tgt_table_set)
+        # Phase B: target table list + schema cache
+        tgt = _connect_target(DATABASE)
+        tgt_table_set = set(_tgt_tables(tgt))
+        only_src = sorted(src_table_set - tgt_table_set)
+        only_tgt = sorted(tgt_table_set - src_table_set)
+        common   = sorted(src_table_set & tgt_table_set)
+        if TABLES_FILTER:
+            common = [t for t in common if t in TABLES_FILTER]
+        _emit_meta(DATABASE, len(common), only_src, only_tgt)
+        tgt_col_cache, tgt_idx_cache = _load_tgt_schema_cache(tgt, DATABASE)
+        tgt.close()
 
-    if TABLES_FILTER:
-        common = [t for t in common if t in TABLES_FILTER]
+        # Phase C: source schema cache
+        src = _connect_source(DATABASE)
+        src_cache = _load_src_schema_cache(src, common)
+        src.close()
+    else:
+        # ── Normal mode (target is MySQL 8) ───────────────────────────────────
+        src = _connect_source(DATABASE)
+        tgt = _connect_target(DATABASE)
 
-    _emit_meta(DATABASE, len(common), only_src, only_tgt)
+        src_table_set = set(_src_tables(src))
+        tgt_table_set = set(_tgt_tables(tgt))
+        only_src = sorted(src_table_set - tgt_table_set)
+        only_tgt = sorted(tgt_table_set - src_table_set)
+        common   = sorted(src_table_set & tgt_table_set)
 
-    # ── Option 2: batch pre-fetch target schema (2 queries total) ──────────────
-    tgt_col_cache, tgt_idx_cache = _load_tgt_schema_cache(tgt, DATABASE)
+        if TABLES_FILTER:
+            common = [t for t in common if t in TABLES_FILTER]
 
-    # ── Option 2: pre-fetch source schema sequentially (SHOW COLUMNS/INDEX × N) ─
-    src_cache = _load_src_schema_cache(src, common)
+        _emit_meta(DATABASE, len(common), only_src, only_tgt)
 
-    src.close()
-    tgt.close()
+        # ── Option 2: batch pre-fetch target schema (2 queries total) ──────────────
+        tgt_col_cache, tgt_idx_cache = _load_tgt_schema_cache(tgt, DATABASE)
+
+        # ── Option 2: pre-fetch source schema sequentially (SHOW COLUMNS/INDEX × N) ─
+        src_cache = _load_src_schema_cache(src, common)
+
+        src.close()
+        tgt.close()
 
     # ── Option 1: parallel table processing ───────────────────────────────────
     # Use multiple workers for fast-check mode; sequential for sync (avoids
