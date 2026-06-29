@@ -35,6 +35,7 @@ _run_done = threading.Event()
 _snapshot: list[str] = []
 _snapshot_lock = threading.Lock()
 _current_sync_tables: list[str] = []   # set before each run
+_pending_runs: list = []   # [(cmd, target_name), ...] sequential queue after current process
 
 
 def _reset_state(sync_tables: list | None = None):
@@ -111,14 +112,40 @@ def _merge_snapshot(new_events: list[str], sync_tables: list[str]) -> list[str]:
     return kept + non_done + done_events
 
 
-def _reader_thread(proc: subprocess.Popen):
+def _reader_thread(proc: subprocess.Popen, target_name: str | None = None):
     for raw in proc.stdout:
         text = raw.decode("utf-8", errors="replace").strip()
-        if text:
-            with _buffer_lock:
-                _output_buffer.append(text)
+        if not text:
+            continue
+        if target_name:
+            try:
+                ev = json.loads(text)
+                ev["target_name"] = target_name
+                text = json.dumps(ev, ensure_ascii=False)
+            except Exception:
+                pass
+        with _buffer_lock:
+            _output_buffer.append(text)
     proc.wait()
     exit_code = proc.returncode
+
+    if target_name:
+        marker = json.dumps({"type": "target_done", "target_name": target_name, "exit_code": exit_code})
+        with _buffer_lock:
+            _output_buffer.append(marker)
+
+    with _process_lock:
+        global _process
+        if _pending_runs:
+            next_cmd, next_tname = _pending_runs.pop(0)
+            _process = subprocess.Popen(
+                next_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=os.path.dirname(os.path.abspath(__file__))
+            )
+            t = threading.Thread(target=_reader_thread, args=(_process, next_tname), daemon=True)
+            t.start()
+            return  # more runs pending, don't emit done yet
+
     done_line = json.dumps({"type": "done", "exit_code": exit_code})
     with _buffer_lock:
         _output_buffer.append(done_line)
@@ -225,27 +252,25 @@ def at_snapshot():
 
 @app.route("/api/all-tables/run", methods=["POST"])
 def at_run_validation():
-    global _process, _current_sync_tables
+    global _process, _current_sync_tables, _pending_runs
     data       = request.json if request.is_json else {}
     db         = data.get("db", "prs")
     skip_sync  = data.get("skip_sync", True)
     sync_limit = data.get("sync_limit", 0)
-    sync_tables   = data.get("sync_tables", [])    # list of table names for full sync pass
-    tables_filter = data.get("tables", [])         # scan only these tables (all checks)
-    year_from  = data.get("year_from")          # int or None → config default window
+    sync_tables   = data.get("sync_tables", [])
+    tables_filter = data.get("tables", [])
+    year_from  = data.get("year_from")
     year_to    = data.get("year_to")
-    month_from      = data.get("month_from")         # int 1-12 or None
-    month_to        = data.get("month_to")
-    day_from        = data.get("day_from")
-    day_to          = data.get("day_to")
+    month_from = data.get("month_from")
+    month_to   = data.get("month_to")
+    day_from   = data.get("day_from")
+    day_to     = data.get("day_to")
 
-    with _process_lock:
-        if _process is not None and _process.poll() is None:
-            return jsonify({"error": "Validation already running"}), 409
-        _current_sync_tables = list(sync_tables)
-        _reset_state(sync_tables=sync_tables or None)
+    def _build_cmd(target_name=None):
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "validate_all_tables.py")
         cmd = [sys.executable, script, "--json", "--db", db]
+        if target_name:
+            cmd += ["--target-name", target_name]
         if sync_tables:
             cmd += ["--sync-tables", ",".join(sync_tables)]
         elif skip_sync:
@@ -266,13 +291,33 @@ def at_run_validation():
             cmd += ["--day-to", str(int(day_to))]
         if tables_filter:
             cmd += ["--tables", ",".join(tables_filter)]
+        return cmd
+
+    with _process_lock:
+        if _process is not None and _process.poll() is None:
+            return jsonify({"error": "Validation already running"}), 409
+        _current_sync_tables = list(sync_tables)
+        _reset_state(sync_tables=sync_tables or None)
+        _pending_runs.clear()
+
+        cfg = _load_config()
+        all_targets = [t for t in cfg.get("targets", []) if t.get("name")]
+
+        if len(all_targets) > 1:
+            runs = [(_build_cmd(t["name"]), t["name"]) for t in all_targets]
+            _pending_runs[:] = runs[1:]
+            first_cmd, first_tname = runs[0]
+        else:
+            first_cmd = _build_cmd()
+            first_tname = None
+
         _process = subprocess.Popen(
-            cmd,
+            first_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
-    t = threading.Thread(target=_reader_thread, args=(_process,), daemon=True)
+    t = threading.Thread(target=_reader_thread, args=(_process, first_tname), daemon=True)
     t.start()
     return jsonify({"started": True, "db": db})
 
@@ -2292,6 +2337,19 @@ def sql_compare():
         if tgt_conn:
             try: tgt_conn.close()
             except Exception: pass
+
+
+@app.route("/api/targets", methods=["GET"])
+def get_targets():
+    cfg = _load_config()
+    targets = cfg.get("targets", [])
+    result = [{"name": t.get("name", ""), "host": t.get("host", ""), "version": t.get("version", 8)}
+              for t in targets if t.get("name")]
+    if not result:
+        t = cfg.get("target", {})
+        if t:
+            result.append({"name": "target", "host": t.get("host", ""), "version": t.get("version", 8)})
+    return jsonify({"targets": result})
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "migrate-validator",
+      "runtimeExecutable": "/Users/ram/Desktop/intern/migrate_test_bot/.venv/bin/python",
+      "runtimeArgs": ["/Users/ram/Desktop/intern/migrate_test_bot/web_server.py"],
+      "port": 5001
+    }
+  ]
+}

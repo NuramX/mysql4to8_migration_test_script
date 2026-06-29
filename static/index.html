@@ -587,6 +587,12 @@
       text-overflow: ellipsis;
     }
 
+    .at-col-target { display: none; }
+    #at-table.multi-target .at-col-target { display: table-cell; }
+    .at-row-cont .at-tname-cell { opacity: 0; }
+    .at-row-cont { border-top: none !important; }
+    .at-row-cont td { border-top: none !important; }
+
     #at-placeholder {
       text-align: center;
       padding: 60px 24px;
@@ -2023,6 +2029,7 @@
             <th style="width:32px"><input type="checkbox" id="at-chk-all" onchange="atToggleAll(this.checked)"
                 title="Select all visible"></th>
             <th>Table Name</th>
+            <th class="at-col-target">Target</th>
             <th>Source Rows</th>
             <th>Target Rows</th>
             <th title="ตรวจสอบจำนวนแถว: เทียบจำนวนแถวระหว่าง Source และ Target ว่ามีรายการตกหล่นหรือไม่"
@@ -2400,7 +2407,7 @@
       }
 
       tables.forEach(t => {
-        if (!atResults[t]) atResults[t] = { checks: {}, checks_data: {}, src_rows: null, tgt_rows: null };
+        if (!atResults[t]) atResults[t] = { checks: {}, checks_data: {}, src_rows: null, tgt_rows: null, _table: t, _target: null };
       });
       document.getElementById('at-table-wrap').style.display = '';
       document.getElementById('at-placeholder').style.display = 'none';
@@ -2584,8 +2591,8 @@
           atConfig.ignore_fields = result.ignore_fields;
           
           const bodyEl = document.getElementById('at-drawer-body');
-          if (bodyEl) {
-            bodyEl.innerHTML = atRenderDetailsContent(table, atResults[table]);
+          if (bodyEl && atOpenTable) {
+            bodyEl.innerHTML = atRenderDetailsContent(table, atResults[atOpenTable]);
           }
         } else {
           alert('Failed to update ignore field settings: ' + (result.error || 'Unknown error'));
@@ -2609,20 +2616,20 @@
       atOpenDrawer(table);
     }
 
-    function atOpenDrawer(table) {
-      // User takes over — abort auto-sample for this specific table
-      if (autoSampleRunning) autoSampleAborted.add(table);
-      atOpenTable = table;
-      const d = atResults[table];
+    function atOpenDrawer(key) {
+      const table = atKeyTable(key);
+      const d = atResults[key];
       if (!d) return;
 
-      // Restore random compare state for this table (persist across open/close)
+      if (autoSampleRunning) autoSampleAborted.add(table);
+      atOpenTable = key;
+
       rcRestoreForTable(table);
 
-      document.getElementById('at-drawer-title').innerHTML = `🔍 <span class="mono" style="color:var(--blue); font-weight:700;">${table}</span> — Migration Audit Report`;
+      const targetLabel = d._target ? ` <span style="color:var(--purple);font-size:13px;font-weight:400">→ ${d._target}</span>` : '';
+      document.getElementById('at-drawer-title').innerHTML = `🔍 <span class="mono" style="color:var(--blue); font-weight:700;">${table}</span>${targetLabel} — Migration Audit Report`;
       document.getElementById('at-drawer-body').innerHTML = atRenderDetailsContent(table, d);
 
-      // Re-render random compare if data exists
       if (rcState.batches.length > 0) {
         rcRender();
       }
@@ -2636,7 +2643,6 @@
         setTimeout(() => { atFcInit(table); atExpInit(table); }, 150);
       }
 
-      // Async fetch timestamp/row-count info — pass known pk_cols to skip redundant DB lookup
       atLoadTsInfo(table, activeDatabase, d.pk_cols || []);
     }
 
@@ -3119,7 +3125,9 @@
 
     function atToggleAll(checked) {
       document.querySelectorAll('#at-tbody input[type=checkbox]').forEach(cb => {
-        const table = cb.closest('tr').querySelector('.at-tname').textContent;
+        const nameEl = cb.closest('tr').querySelector('.at-tname');
+        if (!nameEl) return;
+        const table = nameEl.textContent;
         if (checked) atSelected.add(table); else atSelected.delete(table);
         cb.checked = checked;
       });
@@ -3138,8 +3146,12 @@
       }
       wrap.style.display = ''; ph.style.display = 'none';
 
+      const hasMultiTarget = entries.some(([, d]) => d._target);
+      document.getElementById('at-table').classList.toggle('multi-target', hasMultiTarget);
+
       const rows = entries
-        .filter(([, d]) => {
+        .map(([key, d]) => ({ key, table: d._table || key, target: d._target || null, d }))
+        .filter(({d}) => {
           const st = atTableStatus(d.checks || {});
           if (atFilter === 'all') return true;
           if (atFilter === 'fail') return st === 'fail';
@@ -3147,10 +3159,13 @@
           if (atFilter === 'pass') return st === 'pass';
           return true;
         })
-        .sort((a, b) => a[0].localeCompare(b[0]));
+        .sort((a, b) => a.table.localeCompare(b.table) || (a.target || '').localeCompare(b.target || ''));
 
       const htmlBuffer = [];
-      rows.forEach(([table, d]) => {
+      let prevTable = null;
+      rows.forEach(({key, table, target, d}) => {
+        const isFirst = table !== prevTable;
+        prevTable = table;
         const checks = d.checks || {};
         const checksData = d.checks_data || {};
         const st = atTableStatus(checks);
@@ -3159,17 +3174,22 @@
         const tgtRows = d.tgt_rows != null ? d.tgt_rows.toLocaleString() : '—';
         const checked = atSelected.has(table) ? 'checked' : '';
 
-        htmlBuffer.push(`<tr class="at-row ${st}-row">
+        htmlBuffer.push(`<tr class="at-row ${st}-row${isFirst ? '' : ' at-row-cont'}">
       <td style="text-align:center; position:relative; z-index:10" onclick="event.stopPropagation()">
-        <input type="checkbox" ${checked} onchange="atToggleRowSelection('${table}',this.checked)">
+        ${isFirst ? `<input type="checkbox" ${checked} onchange="atToggleRowSelection('${table}',this.checked)">` : ''}
       </td>
-      <td onclick="atToggleRowDetails('${table}')"><span class="at-tname">${table}</span></td>
-      <td onclick="atToggleRowDetails('${table}')"><span class="at-rows">${srcRows}</span></td>
-      <td onclick="atToggleRowDetails('${table}')"><span class="at-rows">${tgtRows}</span></td>
-      ${CHECK_KEYS.map(k => `<td style="text-align:center" onclick="atToggleRowDetails('${table}')">${atBadge(checks[k])}</td>`).join('')}
-      <td class="at-detail-cell" onclick="atToggleRowDetails('${table}')"><code title="${detail}">${detail || '—'}</code></td>
+      <td class="at-tname-cell" onclick="atToggleRowDetails('${key}')">
+        ${isFirst ? `<span class="at-tname">${table}</span>` : `<span style="color:var(--border);padding-left:20px">↳</span>`}
+      </td>
+      <td class="at-col-target" onclick="atToggleRowDetails('${key}')">
+        <span style="color:var(--purple);font-size:11px;font-weight:600">${target || ''}</span>
+      </td>
+      <td onclick="atToggleRowDetails('${key}')"><span class="at-rows">${srcRows}</span></td>
+      <td onclick="atToggleRowDetails('${key}')"><span class="at-rows">${tgtRows}</span></td>
+      ${CHECK_KEYS.map(k => `<td style="text-align:center" onclick="atToggleRowDetails('${key}')">${atBadge(checks[k])}</td>`).join('')}
+      <td class="at-detail-cell" onclick="atToggleRowDetails('${key}')"><code title="${detail}">${detail || '—'}</code></td>
       <td style="text-align:center" onclick="event.stopPropagation()">
-        <button class="sql-table-btn" onclick="sqlOpen('${table}')" title="Open SQL Runner for ${table}">SQL</button>
+        ${isFirst ? `<button class="sql-table-btn" onclick="sqlOpen('${table}')" title="SQL">SQL</button>` : ''}
       </td>
     </tr>`);
       });
@@ -3232,9 +3252,11 @@
       if (!document.getElementById('at-auto-sample')?.checked) return;
       autoSampleRunning = true;
       autoSampleAborted.clear();
-      const tables = Object.keys(atResults).sort();
+      // Dedupe: only sample each actual table name once (first target wins)
+      const seen = new Set();
+      const tables = Object.keys(atResults).map(k => atKeyTable(k)).filter(t => { if (seen.has(t)) return false; seen.add(t); return true; }).sort();
       for (const table of tables) {
-        if (!autoSampleRunning) break;  // runAllTables() fired — stop immediately
+        if (!autoSampleRunning) break;
         await autoSampleOne(table);
       }
       if (autoSampleRunning) {
@@ -3250,7 +3272,18 @@
       document.getElementById('at-pill-skip').textContent = atCounts.skip;
     }
 
+    function atKey(table, target_name) {
+      return target_name ? table + '|||' + target_name : table;
+    }
+    function atKeyTable(key) { return key.includes('|||') ? key.split('|||')[0] : key; }
+    function atKeyTarget(key) { return key.includes('|||') ? key.split('|||')[1] : null; }
+
     function atHandleEvent(ev) {
+      if (ev.type === 'target_done') {
+        atRenderTable();
+        return;
+      }
+
       if (ev.type === 'meta') {
         if (ev.only_in_src && ev.only_in_src.length) {
           const el = document.getElementById('at-missing-list');
@@ -3275,42 +3308,45 @@
       }
 
       if (ev.type === 'table_start') {
-        if (!atResults[ev.table]) {
-          atResults[ev.table] = { checks: {}, checks_data: {} };
+        const key = atKey(ev.table, ev.target_name);
+        if (!atResults[key]) {
+          atResults[key] = { checks: {}, checks_data: {}, _table: ev.table, _target: ev.target_name || null };
         }
-        atResults[ev.table].src_rows = ev.src_rows;
-        atResults[ev.table].has_pk = ev.has_pk;
-        atResults[ev.table].pk_cols = ev.pk_cols;
+        atResults[key].src_rows = ev.src_rows;
+        atResults[key].has_pk = ev.has_pk;
+        atResults[key].pk_cols = ev.pk_cols;
         return;
       }
 
       if (ev.type === 'result') {
-        if (!atResults[ev.table]) {
-          atResults[ev.table] = { checks: {}, checks_data: {} };
+        const key = atKey(ev.table, ev.target_name);
+        if (!atResults[key]) {
+          atResults[key] = { checks: {}, checks_data: {}, _table: ev.table, _target: ev.target_name || null };
         }
-        const prev = atResults[ev.table].checks[ev.check];
-        atResults[ev.table].checks[ev.check] = ev.status;
-        atResults[ev.table].checks_data[ev.check] = ev;
+        const prev = atResults[key].checks[ev.check];
+        atResults[key].checks[ev.check] = ev.status;
+        atResults[key].checks_data[ev.check] = ev;
 
         if (ev.check === 'row_count' && ev.data) {
-          atResults[ev.table].tgt_rows = ev.data.target;
+          atResults[key].tgt_rows = ev.data.target;
         }
 
         // Update table-level status counts when all checks arrive
-        const allDone = CHECK_KEYS.every(k => atResults[ev.table].checks[k]);
-        if (allDone && !atResults[ev.table]._counted) {
-          atResults[ev.table]._counted = true;
-          const st = atTableStatus(atResults[ev.table].checks);
+        const allDone = CHECK_KEYS.every(k => atResults[key].checks[k]);
+        if (allDone && !atResults[key]._counted) {
+          atResults[key]._counted = true;
+          const st = atTableStatus(atResults[key].checks);
           atCounts[st === 'fail' ? 'fail' : st === 'warn' ? 'warn' : st === 'pass' ? 'pass' : 'skip']++;
           atUpdatePills();
         }
 
-        if (ev.table === atOpenTable) {
-          document.getElementById('at-drawer-body').innerHTML = atRenderDetailsContent(atOpenTable, atResults[atOpenTable]);
+        if (atKey(ev.table, ev.target_name) === atOpenTable) {
+          const _openTableName = atKeyTable(atOpenTable);
+          document.getElementById('at-drawer-body').innerHTML = atRenderDetailsContent(_openTableName, atResults[atOpenTable]);
           // Restore ts-info from cache after re-render (SSE wipes the drawer innerHTML)
-          if (atTsInfoCache[atTsCacheKey(atOpenTable)]) {
+          if (atTsInfoCache[atTsCacheKey(_openTableName)]) {
             const el = document.getElementById('ts-info-body');
-            if (el) el.innerHTML = atRenderTsInfo(atTsInfoCache[atTsCacheKey(atOpenTable)]);
+            if (el) el.innerHTML = atRenderTsInfo(atTsInfoCache[atTsCacheKey(_openTableName)]);
           }
         }
         atRenderTable();

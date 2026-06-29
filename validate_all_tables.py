@@ -32,6 +32,17 @@ if not TARGET_CFG:
     _tgts = _cfg.get("targets", [])
     if isinstance(_tgts, list) and len(_tgts) > 0:
         TARGET_CFG = _tgts[0]
+
+# --target-name: select a specific target from targets[] array by name field
+if "--target-name" in sys.argv:
+    _tn_idx = sys.argv.index("--target-name")
+    if _tn_idx + 1 < len(sys.argv):
+        _tn = sys.argv[_tn_idx + 1]
+        for _t in _cfg.get("targets", []):
+            if _t.get("name") == _tn:
+                TARGET_CFG = _t
+                break
+
 _tuning     = _cfg.get("tuning", {})
 import os
 
