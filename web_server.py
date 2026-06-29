@@ -1237,16 +1237,21 @@ def table_timestamp_info():
 @app.route("/api/custom-query", methods=["POST"])
 def custom_query():
     """
-    Run a read-only SQL query against source, target, or both databases.
-    Accepts: { sql, db, target: "source"|"target"|"both", limit }
-    Returns: { source?: { columns, rows, count }, target?: { columns, rows, count },
-               source_error?: str, target_error?: str }
+    Run a read-only SQL query against source, and/or multiple targets.
+    Accepts: { sql, db, limit, run_source: bool, run_targets: list[str] }
+    Returns: { source?: { columns, rows, count }, source_error?: str,
+               targets: [ { name, result: {columns, rows, count}, error } ] }
     """
     data      = request.json or {}
     sql       = (data.get("sql") or "").strip()
     db        = data.get("db", "prs")
-    target    = data.get("target", "both")
     row_limit = min(int(data.get("limit", 500)), 2000)
+    
+    legacy_target = data.get("target")
+    run_source = data.get("run_source", legacy_target in ("source", "both"))
+    run_targets = data.get("run_targets")
+    if run_targets is None:
+        run_targets = ["ALL"] if legacy_target in ("target", "both") else []
 
     if not sql:
         return jsonify({"error": "Missing 'sql' parameter"}), 400
@@ -1258,11 +1263,10 @@ def custom_query():
 
     cfg     = _load_config()
     src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
-    tgt_cfg = _get_target_config(cfg)
+    
+    result = {"targets": []}
 
-    result = {}
-
-    if target in ("source", "both"):
+    if run_source:
         try:
             from mysql40 import MySQL40Connection
             src_conn = MySQL40Connection(
@@ -1283,25 +1287,38 @@ def custom_query():
         except Exception as e:
             result["source_error"] = str(e)
 
-    if target in ("target", "both"):
-        try:
-            tgt_conn = _connect_target(tgt_cfg, db)
-            exec_sql = sql
-            if sql_upper.startswith("SELECT") and "LIMIT" not in sql_upper:
-                exec_sql = f"{sql} LIMIT {row_limit}"
-            tc = tgt_conn.cursor()
-            tc.execute(exec_sql)
-            columns  = [d[0] for d in tc.description] if tc.description else []
-            rows_raw = tc.fetchall()
-            tc.close()
-            tgt_conn.close()
-            result["target"] = {
-                "columns": columns,
-                "rows": [[str(v) if v is not None else None for v in row] for row in rows_raw],
-                "count": len(rows_raw),
-            }
-        except Exception as e:
-            result["target_error"] = str(e)
+    if run_targets:
+        all_targets = [t for t in cfg.get("targets", []) if t.get("name")]
+        if not all_targets and cfg.get("target"):
+            all_targets = [cfg["target"]]
+            
+        targets_to_run = all_targets if "ALL" in run_targets else [t for t in all_targets if t.get("name") in run_targets]
+        
+        for tgt_cfg in targets_to_run:
+            tgt_res = {"name": tgt_cfg.get("name", "target")}
+            try:
+                tgt_conn = _connect_target(tgt_cfg, db)
+                exec_sql = sql
+                if sql_upper.startswith("SELECT") and "LIMIT" not in sql_upper:
+                    exec_sql = f"{sql} LIMIT {row_limit}"
+                    
+                if int(tgt_cfg.get("version", 8)) == 4:
+                    columns, rows_raw = tgt_conn.query_with_cols(exec_sql)
+                else:
+                    tc = tgt_conn.cursor()
+                    tc.execute(exec_sql)
+                    columns  = [d[0] for d in tc.description] if tc.description else []
+                    rows_raw = tc.fetchall()
+                    tc.close()
+                tgt_conn.close()
+                tgt_res["result"] = {
+                    "columns": columns,
+                    "rows": [[str(v) if v is not None else None for v in row] for row in rows_raw],
+                    "count": len(rows_raw),
+                }
+            except Exception as e:
+                tgt_res["error"] = str(e)
+            result["targets"].append(tgt_res)
 
     return jsonify(result)
 
@@ -1894,13 +1911,21 @@ def _strip_order_limit(sql: str) -> str:
     return s
 
 
-def _sc_worker(sql: str, table: str, db: str):
+def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
     from mysql40 import MySQL40Connection
     from decimal import Decimal as _Dec, InvalidOperation as _DecErr
 
     cfg = _load_config()
     src_cfg = cfg.get("source", DEFAULT_CONFIG["source"])
-    tgt_cfg = cfg.get("target", DEFAULT_CONFIG["target"])
+    tgt_cfg = None
+    if target_name:
+        for t in cfg.get("targets", []):
+            if t.get("name") == target_name:
+                tgt_cfg = t
+                break
+    if not tgt_cfg:
+        tgt_cfg = _get_target_config(cfg)
+        
     _tol, _rnd = _numeric_cmp_params(cfg)
 
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "reports")
@@ -1945,10 +1970,13 @@ def _sc_worker(sql: str, table: str, db: str):
                 pass
         src_conn.close(); src_conn = None
 
-        tc = tgt_conn.cursor()
-        tc.execute(f"{strip_sql} LIMIT 1")
-        tgt_cols = [d[0] for d in tc.description] if tc.description else []
-        tc.close()
+        if tgt_version == 4:
+            tgt_cols, _ = tgt_conn.query_with_cols(f"{strip_sql} LIMIT 1")
+        else:
+            tc = tgt_conn.cursor()
+            tc.execute(f"{strip_sql} LIMIT 1")
+            tgt_cols = [d[0] for d in tc.description] if tc.description else []
+            tc.close()
 
         tgt_col_set = set(tgt_cols)
         common_cols = [c for c in src_cols if c in tgt_col_set]
@@ -1995,10 +2023,11 @@ def _sc_worker(sql: str, table: str, db: str):
             database=db, timeout=3600, charset="tis620",
         )
 
-        tc_setup = tgt_conn.cursor()
-        tc_setup.execute("SET SESSION net_write_timeout=3600")
-        tc_setup.execute("SET SESSION net_read_timeout=3600")
-        tc_setup.close()
+        if tgt_version != 4:
+            tc_setup = tgt_conn.cursor()
+            tc_setup.execute("SET SESSION net_write_timeout=3600")
+            tc_setup.execute("SET SESSION net_read_timeout=3600")
+            tc_setup.close()
 
         src_idx = {c: i for i, c in enumerate(src_cols)}
         tgt_idx = {c: i for i, c in enumerate(tgt_cols)}
@@ -2028,13 +2057,19 @@ def _sc_worker(sql: str, table: str, db: str):
 
         src_gen = src_conn.query_stream(stream_sql)
 
-        tgt_cur = tgt_conn.cursor(MySQLdb.cursors.SSCursor)
-        tgt_cur.execute(stream_sql)
-        def tgt_gen():
-            while not _sc_stop.is_set():
-                r = tgt_cur.fetchone()
-                if r is None: break
-                yield r
+        if tgt_version == 4:
+            def tgt_gen():
+                for r in tgt_conn.query_stream(stream_sql):
+                    if _sc_stop.is_set(): break
+                    yield r
+        else:
+            tgt_cur = tgt_conn.cursor(MySQLdb.cursors.SSCursor)
+            tgt_cur.execute(stream_sql)
+            def tgt_gen():
+                while not _sc_stop.is_set():
+                    r = tgt_cur.fetchone()
+                    if r is None: break
+                    yield r
 
         # ── Two-pointer merge ─────────────────────────────────────────────────
         csv_path = os.path.join(reports_dir, f"{SC_REPORT}_mismatches.csv")
@@ -2160,6 +2195,7 @@ def sc_run_stream():
     sql   = (data.get("sql") or "").strip()
     table = (data.get("table") or "").strip()
     db    = data.get("db", "prs")
+    target_name = data.get("target")
 
     if not sql:
         return jsonify({"error": "Missing sql"}), 400
@@ -2170,7 +2206,7 @@ def sc_run_stream():
         if _sc_thread and _sc_thread.is_alive():
             return jsonify({"error": "Already running"}), 409
         _sc_reset()
-        _sc_thread = threading.Thread(target=_sc_worker, args=(sql, table, db), daemon=True)
+        _sc_thread = threading.Thread(target=_sc_worker, args=(sql, table, db, target_name), daemon=True)
         _sc_thread.start()
     return jsonify({"started": True})
 

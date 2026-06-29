@@ -2328,9 +2328,7 @@
         <div class="sql-controls-row">
           <label style="font-size:12px; color:var(--muted); white-space:nowrap">Run on:</label>
           <select id="sql-target" class="sql-select">
-            <option value="source">Source only</option>
-            <option value="target">Target only (MySQL 8)</option>
-            <option value="both" selected>Both (compare)</option>
+            <option value="source_only">Source only</option>
           </select>
           <label style="font-size:12px; color:var(--muted); white-space:nowrap; margin-left:8px">Limit:</label>
           <select id="sql-limit" class="sql-select">
@@ -2371,6 +2369,8 @@
             <option value="">— เลือก table —</option>
           </select>
           <span id="sc-db-label" style="font-size:11px;color:var(--muted);white-space:nowrap;padding:0 6px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;height:28px;display:flex;align-items:center"></span>
+          <label style="font-size:12px;color:var(--muted);white-space:nowrap;margin-left:8px">Target:</label>
+          <select id="sc-target-select" class="sql-select" style="width:140px;font-family:'JetBrains Mono',monospace"></select>
         </div>
         <div id="sc-columns" style="display:none;flex-wrap:wrap;gap:5px;padding:4px 0"></div>
         <textarea id="sc-sql" class="sql-textarea" placeholder="SELECT col1, col2, col3 FROM `table_name` WHERE ..."
@@ -4782,6 +4782,25 @@
 
       document.getElementById('sql-results').innerHTML = '';
       document.getElementById('sql-status').textContent = '';
+      
+      const targetSel = document.getElementById('sql-target');
+      const prevVal = targetSel.value;
+      fetch('/api/targets').then(res => res.json()).then(data => {
+        targetSel.innerHTML = '';
+        const targets = data.targets || [];
+        
+        targetSel.add(new Option('Source only', 'source_only'));
+        targets.forEach(t => {
+          targetSel.add(new Option(`${t.name} only`, `target_only:${t.name}`));
+          targetSel.add(new Option(`${t.name} + Source`, `target_source:${t.name}`));
+        });
+        if (targets.length > 0) {
+          targetSel.add(new Option('All Targets + Source', 'all_source'));
+        }
+        if (prevVal) targetSel.value = prevVal;
+        if (!targetSel.value && targets.length > 0) targetSel.value = `target_source:${targets[0].name}`;
+      }).catch(() => {});
+
       overlay.classList.add('active');
       drawer.classList.add('active');
       setTimeout(() => input.focus(), 100);
@@ -4805,14 +4824,21 @@
     });
 
     async function sqlRun() {
-      const sql = (document.getElementById('sql-input').value || '').trim();
+      const rawSql = (document.getElementById('sql-input').value || '').trim();
       const target = document.getElementById('sql-target').value;
       const limit = parseInt(document.getElementById('sql-limit').value, 10);
       const btn = document.getElementById('sql-run-btn');
       const status = document.getElementById('sql-status');
       const resDiv = document.getElementById('sql-results');
 
-      if (!sql) { status.textContent = 'SQL is empty.'; return; }
+      if (!rawSql) { status.textContent = 'SQL is empty.'; return; }
+
+      // Split by semicolon for multiple queries
+      const queries = rawSql.split(';')
+        .map(q => q.trim())
+        .filter(q => q.length > 0);
+
+      if (queries.length === 0) { status.textContent = 'SQL is empty.'; return; }
 
       btn.disabled = true;
       document.getElementById('sql-btn-icon').textContent = '⌛';
@@ -4820,51 +4846,74 @@
       status.textContent = '';
       resDiv.innerHTML = '';
 
-      const t0 = Date.now();
-      try {
-        const resp = await fetch('/api/custom-query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sql, db: activeDatabase, target, limit }),
-        });
-        const data = await resp.json();
-        const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
-
-        if (!resp.ok) {
-          resDiv.innerHTML = `<div class="sql-error-box">Error: ${sqlEsc(data.error || 'Unknown error')}</div>`;
-          return;
-        }
-
-        status.textContent = `Done in ${elapsed}s`;
-
-        const blocks = [];
-
-        if (data.source_error) {
-          blocks.push(`<div class="sql-result-block">
-        <div class="sql-result-header" style="color:var(--blue)">Source</div>
-        <div class="sql-error-box" style="margin:8px">Error: ${sqlEsc(data.source_error)}</div>
-      </div>`);
-        } else if (data.source) {
-          blocks.push(sqlResultBlock('Source', 'var(--blue)', data.source));
-        }
-
-        if (data.target_error) {
-          blocks.push(`<div class="sql-result-block">
-        <div class="sql-result-header" style="color:var(--purple)">Target</div>
-        <div class="sql-error-box" style="margin:8px">Error: ${sqlEsc(data.target_error)}</div>
-      </div>`);
-        } else if (data.target) {
-          blocks.push(sqlResultBlock('Target', 'var(--purple)', data.target));
-        }
-
-        resDiv.innerHTML = blocks.join('') || '<div style="color:var(--muted);font-size:12px;padding:8px">No results.</div>';
-      } catch (err) {
-        resDiv.innerHTML = `<div class="sql-error-box">Network error: ${sqlEsc(err.message)}</div>`;
-      } finally {
-        btn.disabled = false;
-        document.getElementById('sql-btn-icon').textContent = '▶';
-        document.getElementById('sql-btn-text').textContent = 'Run Query';
+      let run_source = false;
+      let run_targets = [];
+      const targetVal = document.getElementById('sql-target').value;
+      
+      if (targetVal === 'source_only') {
+        run_source = true;
+      } else if (targetVal === 'all_source') {
+        run_source = true;
+        run_targets = ['ALL'];
+      } else if (targetVal.startsWith('target_only:')) {
+        run_targets = [targetVal.split(':')[1]];
+      } else if (targetVal.startsWith('target_source:')) {
+        run_source = true;
+        run_targets = [targetVal.split(':')[1]];
       }
+
+      const t0 = Date.now();
+      let allBlocks = [];
+      let hasError = false;
+
+      for (let i = 0; i < queries.length; i++) {
+        const sql = queries[i];
+        if (queries.length > 1) {
+          allBlocks.push(`<div style="margin-top:16px; font-weight:600; font-family:'JetBrains Mono', monospace; font-size:12px; color:var(--text); padding-bottom:4px; border-bottom:1px solid var(--border)">Query ${i + 1}: ${sqlEsc(sql.length > 80 ? sql.substring(0, 80) + '...' : sql)}</div>`);
+        }
+        
+        try {
+          const resp = await fetch('/api/custom-query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sql, db: activeDatabase, limit, run_source, run_targets }),
+          });
+          const data = await resp.json();
+          
+          if (!resp.ok) {
+            allBlocks.push(`<div class="sql-error-box">Error: ${sqlEsc(data.error || 'Unknown error')}</div>`);
+            hasError = true;
+          } else {
+            if (data.source_error) {
+              allBlocks.push(`<div class="sql-result-block"><div class="sql-result-header" style="color:var(--blue)">Source</div><div class="sql-error-box" style="margin:8px">Error: ${sqlEsc(data.source_error)}</div></div>`);
+            } else if (data.source) {
+              allBlocks.push(sqlResultBlock('Source', 'var(--blue)', data.source));
+            }
+  
+            const targets = data.targets || [];
+            targets.forEach(tgt => {
+              if (tgt.error) {
+                allBlocks.push(`<div class="sql-result-block"><div class="sql-result-header" style="color:var(--purple)">Target (${sqlEsc(tgt.name)})</div><div class="sql-error-box" style="margin:8px">Error: ${sqlEsc(tgt.error)}</div></div>`);
+              } else if (tgt.result) {
+                allBlocks.push(sqlResultBlock(`Target (${sqlEsc(tgt.name)})`, 'var(--purple)', tgt.result));
+              }
+            });
+          }
+        } catch (err) {
+          allBlocks.push(`<div class="sql-error-box">Network error: ${sqlEsc(err.message)}</div>`);
+          hasError = true;
+        }
+
+        resDiv.innerHTML = allBlocks.join('') || '<div style="color:var(--muted);font-size:12px;padding:8px">No results.</div>';
+        if (hasError) break; // Stop on first error
+      }
+      
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+      status.textContent = `Done in ${elapsed}s`;
+
+      btn.disabled = false;
+      document.getElementById('sql-btn-icon').textContent = '▶';
+      document.getElementById('sql-btn-text').textContent = 'Run Query';
     }
 
     function sqlResultBlock(label, color, result) {
@@ -4940,6 +4989,21 @@
 
       const lbl = document.getElementById('sc-db-label');
       if (lbl) lbl.textContent = activeDatabase;
+
+      const targetSel = document.getElementById('sc-target-select');
+      const prevTarget = targetSel.value;
+      try {
+        const res = await fetch('/api/targets');
+        const data = await res.json();
+        targetSel.innerHTML = '<option value="">— Default Target —</option>';
+        (data.targets || []).forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t.name;
+          opt.textContent = `${t.name} (${t.host})`;
+          if (t.name === prevTarget) opt.selected = true;
+          targetSel.appendChild(opt);
+        });
+      } catch(e) {}
     }
 
     async function scLoadColumns(table) {
@@ -5003,6 +5067,7 @@
     async function scRun() {
       const sql   = (document.getElementById('sc-sql').value || '').trim();
       const table = (document.getElementById('sc-table').value || '').trim();
+      const targetName = document.getElementById('sc-target-select').value;
       const btn     = document.getElementById('sc-run-btn');
       const stopBtn = document.getElementById('sc-stop-btn');
       const status  = document.getElementById('sc-status');
@@ -5036,7 +5101,7 @@
         const res  = await fetch('/api/sql-compare/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sql, table, db: activeDatabase }),
+          body: JSON.stringify({ sql, table, db: activeDatabase, target: targetName }),
         });
         const data = await res.json();
         if (data.error) {
@@ -5112,10 +5177,11 @@
       const panel = document.getElementById('sc-panel');
       panel.innerHTML = `<div class="rc-empty"><div style="font-size:22px;margin-bottom:8px">⏳</div><div>กำลังโหลดผลลัพธ์…</div></div>`;
       try {
+        const targetName = document.getElementById('sc-target-select').value;
         const res  = await fetch('/api/reports/full-compare/paged', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ table: '_sql_compare', page: scState.pagedPage,
+          body: JSON.stringify({ table: '_sql_compare', target_name: targetName, page: scState.pagedPage,
             page_size: scState.pagedPageSize, filter_type: scState.pagedFilter }),
         });
         const data = await res.json();
