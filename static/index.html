@@ -2018,6 +2018,83 @@
       border-radius: 4px;
       margin: 4px 0;
     }
+
+    /* ─── Responsive Adjustments ─────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .ov-top {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+        padding: 12px 0;
+      }
+      .ov-top > div {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+      }
+      .ov-title {
+        flex-wrap: wrap;
+      }
+      #overview {
+        padding: 0 16px;
+      }
+      #at-filter-bar, #at-summary-bar {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+      .db-badge {
+        flex-direction: row;
+        flex-wrap: wrap;
+      }
+      .search-input {
+        min-width: 100%;
+        width: 100%;
+      }
+      .table-filter-bar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .filter-btn-group {
+        display: flex;
+        width: 100%;
+      }
+      .filter-btn {
+        flex: 1;
+        text-align: center;
+      }
+      #at-run-btn, #at-sync-btn, #at-quick-btn {
+        width: 100%;
+        justify-content: center;
+      }
+      .at-pill {
+        width: 48%;
+      }
+      .drawer-content {
+        max-width: 100%;
+        width: 100%;
+      }
+      .cfg-tgt-summary {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .cfg-tgt-form-inner .form-row-3, 
+      .cfg-tgt-form-inner .form-row-2 {
+        grid-template-columns: 1fr;
+      }
+      .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .form-row {
+        grid-template-columns: 1fr;
+      }
+      .settings-btn, .sql-runner-btn {
+        flex: 1;
+        justify-content: center;
+      }
+      #at-table th, #at-table td {
+        padding: 8px;
+        font-size: 11px;
+      }
+    }
   </style>
 </head>
 
