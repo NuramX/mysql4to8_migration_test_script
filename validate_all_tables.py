@@ -886,29 +886,29 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
     # Reuse the caller's tgt connection if provided (avoids a 3rd concurrent
     # connection to MySQL 4 which blocks when max_user_connections is limited).
     _owns_tgt = tgt_conn is None
+    # Persistent connections opened inside this function (MySQL 4 path only).
+    _extra_src_conn = None
+    _extra_tgt_conn = None
 
     if TARGET_CFG.get("version") == 4:
-        # ── MySQL 4 target: fresh-connection-per-chunk fetch functions ──────────
-        # Python generators are single-threaded: src chunk is fetched, connection
-        # closed, then tgt chunk is fetched, connection closed.  This guarantees
-        # we never hold two MySQL 4 connections open simultaneously.
+        # ── MySQL 4 target: persistent connections per stream call ────────────
+        # src (192.168.48.241) and tgt (192.168.68.68) are on different servers
+        # with independent per-user connection limits, so holding both open
+        # simultaneously is safe.  One connection per side eliminates the
+        # per-chunk TCP handshake that was the main latency for small tables.
+        _extra_src_conn = _connect_source(DATABASE)
+        _extra_tgt_conn = _connect_target(DATABASE)
+
         def _src_fetch(sql):
-            c = _connect_source(DATABASE)
-            try:
-                return c.query(sql)
-            finally:
-                c.close()
+            return _extra_src_conn.query(sql)
 
         def _tgt_fetch(sql):
-            c = _connect_target(DATABASE)
+            cur = _extra_tgt_conn.cursor()
             try:
-                cur = c.cursor()
                 cur.execute(sql)
-                result = cur.fetchall()
-                cur.close()
-                return result
+                return cur.fetchall()
             finally:
-                c.close()
+                cur.close()
 
         # No BINARY for 4vs4: same charset/collation on both sides, and BINARY
         # prevents MySQL 4 from using the B-tree PK index (see comment below).
@@ -1200,6 +1200,12 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
             "samples": samples[:MAX_ERRORS],
         }
     finally:
+        if _extra_src_conn:
+            try: _extra_src_conn.close()
+            except: pass
+        if _extra_tgt_conn:
+            try: _extra_tgt_conn.close()
+            except: pass
         if csv_file:
             try: csv_file.close()
             except: pass
@@ -1328,7 +1334,7 @@ def _process_table(table: str, src_cache: dict,
         if has_pk:
             # dup_pk: instant PASS (enforced by DB constraint), no connection needed
             check_duplicate_pk(table, pk_cols, None, None, actual)
-            # Phase 3: full sync with fresh-per-chunk connections
+            # Phase 3: full sync (persistent connections opened inside _stream_compare)
             check_full_sync(table, pk_cols, all_cols, None, None, actual, ts_col)
         else:
             _emit(table, "dup_pk",    "Duplicate PK",    SKIP,
@@ -1431,9 +1437,9 @@ def main():
         tgt.close()
 
     # ── Option 1: parallel table processing ───────────────────────────────────
-    # Use multiple workers for fast-check mode; sequential for sync (avoids
-    # overwhelming MySQL 4 with parallel streaming cursors).
-    workers = 1 if (SYNC_ONLY_MODE or not SKIP_SYNC) else WORKERS
+    # MySQL 4 target: max_user_connections requires sequential table processing.
+    # MySQL 8 target: parallel across all modes (each table opens its own conns).
+    workers = 1 if (SYNC_ONLY_MODE or TARGET_CFG.get("version") == 4) else WORKERS
 
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as ex:

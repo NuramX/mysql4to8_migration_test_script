@@ -107,7 +107,7 @@
     "Nodvd": "timestamp",
     "Nvdr": "timestamp",
     "OtherCap": "timestamp",
-    "Rights": "timestamp",
+    "Rights": "news_ann_date",
     "SecBal": "timestamp",
     "Security": "timestamp",
     "Silent": "timestamp",
