@@ -359,6 +359,10 @@
       border-bottom: 1px solid var(--border);
       align-items: center;
       flex-wrap: wrap;
+      position: sticky;
+      top: var(--overview-h, 0px);
+      z-index: 99;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
 
     #at-quick-btn {
@@ -4015,7 +4019,15 @@
     }
 
     // Initialize connection settings and database dropdown on DOM load
+    function _syncOverviewHeight() {
+      const ov = document.getElementById('overview');
+      if (ov) document.documentElement.style.setProperty('--overview-h', ov.offsetHeight + 'px');
+    }
+    window.addEventListener('resize', _syncOverviewHeight);
+    new ResizeObserver(_syncOverviewHeight).observe(document.getElementById('overview') || document.body);
+
     window.addEventListener('DOMContentLoaded', async () => {
+      _syncOverviewHeight();
       await atInitSettings();
       atInitYearWindow();
       atReplayIfAvailable();
