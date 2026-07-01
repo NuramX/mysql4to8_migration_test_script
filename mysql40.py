@@ -59,6 +59,24 @@ def _send_packet(sock: socket.socket, data: bytes, seq: int) -> None:
     sock.sendall(header + data)
 
 
+def _read_len_enc_int(data: bytes, pos: int) -> tuple[int, int]:
+    """Read a length-encoded integer from data starting at pos.
+    Returns (value, next_pos).
+    """
+    first = data[pos]
+    if first < 251:
+        return first, pos + 1
+    if first == 251:
+        return None, pos + 1
+    if first == 252:
+        return struct.unpack_from('<H', data, pos + 1)[0], pos + 3
+    if first == 253:
+        return struct.unpack_from('<I', data[pos+1:pos+4] + b'\x00')[0], pos + 4
+    if first == 254:
+        return struct.unpack_from('<Q', data, pos + 1)[0], pos + 9
+    raise ValueError("Invalid length-encoded integer")
+
+
 class MySQL40Cursor:
     def __init__(self, conn):
         self.conn = conn
@@ -176,7 +194,7 @@ class MySQL40Connection:
             errmsg = header_pkt[3:].decode('latin1', errors='replace')
             raise RuntimeError(f"Query error {errno}: {errmsg}")
 
-        num_cols = header_pkt[0]
+        num_cols, _ = _read_len_enc_int(header_pkt, 0)
 
         # Read column definitions
         for _ in range(num_cols):
@@ -225,7 +243,7 @@ class MySQL40Connection:
             errmsg = header_pkt[3:].decode('latin1', errors='replace')
             raise RuntimeError(f"Query error {errno}: {errmsg}")
 
-        num_cols = header_pkt[0]
+        num_cols, _ = _read_len_enc_int(header_pkt, 0)
 
         columns: list[str] = []
         for _ in range(num_cols):
@@ -278,7 +296,7 @@ class MySQL40Connection:
             errmsg = header_pkt[3:].decode('latin1', errors='replace')
             raise RuntimeError(f"Query error {errno}: {errmsg}")
 
-        num_cols = header_pkt[0]
+        num_cols, _ = _read_len_enc_int(header_pkt, 0)
 
         # Read column definitions
         for _ in range(num_cols):

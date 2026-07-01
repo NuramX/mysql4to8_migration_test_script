@@ -11,8 +11,14 @@ import sys
 import json
 import re
 import threading
-import MySQLdb
-import MySQLdb.cursors
+try:
+    import MySQLdb
+    import MySQLdb.cursors
+except ModuleNotFoundError:
+    import pymysql
+    pymysql.install_as_MySQLdb()
+    import MySQLdb
+    import MySQLdb.cursors
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
