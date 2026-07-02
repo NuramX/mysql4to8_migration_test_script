@@ -1945,6 +1945,27 @@ def _sc_worker(sql: str, table: str, db: str):
                       "message": f"PK column(s) {missing_pk} not in SELECT — add them to your query"})
             _sc_emit({"type": "done", "exit_code": 1}); return
 
+        # Column to call out in the Missing/Extra report when the table has one
+        # configured in ts_field_config.json; otherwise every common column is
+        # written so the reader can locate where the data breaks.
+        _ts_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts_field_config.json")
+        try:
+            with open(_ts_config_path, "r", encoding="utf-8") as _tf:
+                _sc_ts_config = json.load(_tf)
+        except Exception:
+            _sc_ts_config = {}
+        remark_ts_col = _sc_ts_config.get(db, {}).get(table) if table else None
+        remark_cols = [remark_ts_col] if (remark_ts_col and remark_ts_col in common_cols) else common_cols
+
+        def _write_me_row(csv_w, rtype, ps, vals_by_col):
+            for c in remark_cols:
+                v = vals_by_col.get(c)
+                val = v if v is not None else "NULL"
+                if rtype == "missing":
+                    csv_w.writerow(["missing", ps, c, val, ""])
+                else:
+                    csv_w.writerow(["extra", ps, c, "", val])
+
         # ── Build streaming SQL ───────────────────────────────────────────────
         _str_type_keywords = ("char", "text", "enum", "set", "varchar", "binary", "blob")
         pk_str_mask = [
@@ -2063,7 +2084,7 @@ def _sc_worker(sql: str, table: str, db: str):
                     _src = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
                     ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
                         "cols": common_cols, "src": _src}, ensure_ascii=False) + "\n")
-                    csv_w.writerow(["missing", pk_str(d), "ALL", "Present in Source", "Missing in Target"])
+                    _write_me_row(csv_w, "missing", pk_str(d), dict(zip(common_cols, _src)))
                     s_row = next(src_gen, None)
                 else:
                     extra += 1; total += 1
@@ -2071,7 +2092,7 @@ def _sc_worker(sql: str, table: str, db: str):
                     _tgt = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
                     ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
                         "cols": common_cols, "tgt": _tgt}, ensure_ascii=False) + "\n")
-                    csv_w.writerow(["extra", pk_str(d), "ALL", "Missing in Source", "Extra in Target"])
+                    _write_me_row(csv_w, "extra", pk_str(d), dict(zip(common_cols, _tgt)))
                     t_row = next(t_iter, None)
 
             elif s_row is not None:
@@ -2080,7 +2101,7 @@ def _sc_worker(sql: str, table: str, db: str):
                 _src = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
                 ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
                     "cols": common_cols, "src": _src}, ensure_ascii=False) + "\n")
-                csv_w.writerow(["missing", pk_str(d), "ALL", "Present in Source", "Missing in Target"])
+                _write_me_row(csv_w, "missing", pk_str(d), dict(zip(common_cols, _src)))
                 s_row = next(src_gen, None)
             else:
                 extra += 1; total += 1
@@ -2088,7 +2109,7 @@ def _sc_worker(sql: str, table: str, db: str):
                 _tgt = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
                 ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
                     "cols": common_cols, "tgt": _tgt}, ensure_ascii=False) + "\n")
-                csv_w.writerow(["extra", pk_str(d), "ALL", "Missing in Source", "Extra in Target"])
+                _write_me_row(csv_w, "extra", pk_str(d), dict(zip(common_cols, _tgt)))
                 t_row = next(t_iter, None)
 
             if total - last_prog >= PROG:
