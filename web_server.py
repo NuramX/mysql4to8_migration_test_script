@@ -1889,10 +1889,20 @@ def _sc_worker(sql: str, table: str, db: str):
         tgt_conn = _connect_target(tgt_cfg, db)
 
         tgt_version = int(tgt_cfg.get("version", 8))
-        pk_cols = []
-        if table:
-            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
 
+        # No table selected in the dropdown — infer it from the SQL text so the
+        # real PK (from schema) is still used instead of falling back to
+        # "first SELECTed column", which silently collapses duplicate-key rows
+        # in the merge dict and produces wrong totals vs. Full Sync.
+        _type_table = table
+        if not _type_table:
+            _m = _re.search(r'\bFROM\s+`?(\w+)`?', strip_sql, _re.IGNORECASE)
+            if _m:
+                _type_table = _m.group(1)
+
+        pk_cols = []
+        if _type_table:
+            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, _type_table)
 
         src_conn = MySQL40Connection(
             host=src_cfg["host"], port=int(src_cfg["port"]),
@@ -1901,12 +1911,6 @@ def _sc_worker(sql: str, table: str, db: str):
         )
         src_cols, _ = src_conn.query_with_cols(f"{strip_sql} LIMIT 1")
         src_col_type_map = {}
-        _type_table = table
-        if not _type_table:
-            # No table selected — infer from SQL so BINARY is applied for string PKs
-            _m = _re.search(r'\bFROM\s+`?(\w+)`?', strip_sql, _re.IGNORECASE)
-            if _m:
-                _type_table = _m.group(1)
         if _type_table:
             try:
                 src_col_rows = src_conn.query(f"SHOW COLUMNS FROM `{_type_table}`")
@@ -1927,9 +1931,9 @@ def _sc_worker(sql: str, table: str, db: str):
         common_cols = [c for c in src_cols if c in tgt_col_set]
 
         # Filter out ignored columns if a table is specified, but ALWAYS preserve PK columns
-        if table:
+        if _type_table:
             cfg = _load_config()
-            ignored = cfg.get("ignore_fields", {}).get(db, {}).get(table, [])
+            ignored = cfg.get("ignore_fields", {}).get(db, {}).get(_type_table, [])
             common_cols = [c for c in common_cols if c not in ignored or c in pk_cols]
 
         if not common_cols:
@@ -1954,7 +1958,7 @@ def _sc_worker(sql: str, table: str, db: str):
                 _sc_ts_config = json.load(_tf)
         except Exception:
             _sc_ts_config = {}
-        remark_ts_col = _sc_ts_config.get(db, {}).get(table) if table else None
+        remark_ts_col = _sc_ts_config.get(db, {}).get(_type_table) if _type_table else None
         remark_cols = [remark_ts_col] if (remark_ts_col and remark_ts_col in common_cols) else common_cols
 
         def _write_me_row(csv_w, rtype, ps, vals_by_col):
@@ -2270,9 +2274,19 @@ def sql_compare():
         common_cols = [c for c in src_cols if c in tgt_col_set]
         if not common_cols:
             return jsonify({"error": "No common columns between source and target result sets"}), 400
+
+        # No table selected in the dropdown — infer it from the SQL text so the
+        # real PK (from schema) is still used instead of falling back to
+        # "first SELECTed column", which silently collapses duplicate-key rows.
+        _type_table = table
+        if not _type_table:
+            _m = _re.search(r'\bFROM\s+`?(\w+)`?', sql, _re.IGNORECASE)
+            if _m:
+                _type_table = _m.group(1)
+
         pk_cols = []
-        if table:
-            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
+        if _type_table:
+            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, _type_table)
 
             missing_pk = [c for c in pk_cols if c not in set(common_cols)]
             if missing_pk:
