@@ -1546,12 +1546,14 @@ def download_excel(table):
     # ── Pass 1: discover PK columns + collect all grouped data ───────────
     pk_cols = []
     mm_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
-    ms_rows   = []   # [pk_dict]
-    ex_rows   = []   # [pk_dict]
+    ms_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
+    ex_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
 
-    cur_key = None
-    cur_pk  = None
-    cur_fields = []
+    _cur = {
+        "mismatch": {"key": None, "pk": None, "fields": [], "out": mm_groups},
+        "missing":  {"key": None, "pk": None, "fields": [], "out": ms_groups},
+        "extra":    {"key": None, "pk": None, "fields": [], "out": ex_groups},
+    }
 
     def parse_pk(pk_str):
         d = {}
@@ -1563,9 +1565,10 @@ def download_excel(table):
                     pk_cols.append(kv[0])
         return d
 
-    def flush_mm():
-        if cur_key and cur_fields:
-            mm_groups.append({"pk": cur_pk, "fields": cur_fields[:]})
+    def flush(rtype):
+        c = _cur[rtype]
+        if c["key"] and c["fields"]:
+            c["out"].append({"pk": c["pk"], "fields": c["fields"][:]})
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv_mod.reader(f)
@@ -1575,18 +1578,16 @@ def download_excel(table):
                 continue
             rtype, pk_str, col, src_val, tgt_val = row[0], row[1], row[2], row[3], row[4]
             pk_dict = parse_pk(pk_str)
-            if rtype == "mismatch":
-                key = pk_str
-                if key != cur_key:
-                    flush_mm()
-                    cur_key, cur_pk, cur_fields = key, pk_dict, []
-                if col != "ALL":
-                    cur_fields.append((col, src_val, tgt_val))
-            elif rtype == "missing":
-                ms_rows.append(pk_dict)
-            elif rtype == "extra":
-                ex_rows.append(pk_dict)
-    flush_mm()
+            if rtype not in _cur:
+                continue
+            c = _cur[rtype]
+            key = pk_str
+            if key != c["key"]:
+                flush(rtype)
+                c["key"], c["pk"], c["fields"] = key, pk_dict, []
+            if col != "ALL":
+                c["fields"].append((col, src_val, tgt_val))
+    flush("mismatch"); flush("missing"); flush("extra")
 
     # ── Build workbook ────────────────────────────────────────────────────
     buf = io.BytesIO()
@@ -1618,7 +1619,6 @@ def download_excel(table):
 
     NUM  = fmt(font_color="#9CA3AF", font_size=9, border=1, border_color="#E5E7EB",
                align="center", valign="vcenter")
-    NOTE = fmt(font_color="#6B7280", italic=True, border=1, border_color="#E5E7EB", valign="vcenter")
 
     # ── Sheet 1: Summary ─────────────────────────────────────────────────
     ws = wb.add_worksheet("📊 Summary")
@@ -1678,33 +1678,67 @@ def download_excel(table):
 
         r += nrows
 
-    # ── Sheet 3: Missing ─────────────────────────────────────────────────
+    # ── Sheet 3: Missing (merged PK cells, mismatch-style grid) ──────────
     ws3 = wb.add_worksheet("🟡 Missing")
     ws3.hide_gridlines(2); ws3.freeze_panes(1, 0)
-    hdr3 = ["#"] + pk_cols + ["หมายเหตุ"]
+    hdr3 = ["#"] + pk_cols + ["Column Name", src_label, tgt_label]
     ws3.write_row(0, 0, hdr3, HDR); ws3.set_row(0, 24)
     ws3.set_column(0, 0, 6)
     for ci, w in enumerate(pk_w): ws3.set_column(ci+1, ci+1, min(w, 36))
-    ws3.set_column(pk_n+1, pk_n+1, 32)
-    for i, pk_dict in enumerate(ms_rows):
-        ws3.write(i+1, 0, i+1, NUM)
-        for ci, c in enumerate(pk_cols):
-            ws3.write(i+1, ci+1, pk_dict.get(c, ""), PK)
-        ws3.write(i+1, pk_n+1, f"มีใน {src_label} แต่ไม่มีใน {tgt_label}", NOTE)
+    ws3.set_column(pk_n+1, pk_n+1, 22)
+    ws3.set_column(pk_n+2, pk_n+2, 28); ws3.set_column(pk_n+3, pk_n+3, 28)
 
-    # ── Sheet 4: Extra ───────────────────────────────────────────────────
+    r = 1
+    for grp_i, grp in enumerate(ms_groups):
+        pk_vals = [grp["pk"].get(c, "") for c in pk_cols]
+        nrows   = len(grp["fields"]) or 1
+
+        if nrows > 1:
+            ws3.merge_range(r, 0, r+nrows-1, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws3.merge_range(r, ci+1, r+nrows-1, ci+1, v, PK)
+        else:
+            ws3.write(r, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws3.write(r, ci+1, v, PK)
+
+        for fi, (col, src, tgt) in enumerate(grp["fields"]):
+            ws3.write(r+fi, pk_n+1, col, MS)
+            ws3.write(r+fi, pk_n+2, src or "-", MS)
+            ws3.write(r+fi, pk_n+3, tgt or "-", MS)
+
+        r += nrows
+
+    # ── Sheet 4: Extra (merged PK cells, mismatch-style grid) ────────────
     ws4 = wb.add_worksheet("🔵 Extra")
     ws4.hide_gridlines(2); ws4.freeze_panes(1, 0)
-    hdr4 = ["#"] + pk_cols + ["หมายเหตุ"]
+    hdr4 = ["#"] + pk_cols + ["Column Name", src_label, tgt_label]
     ws4.write_row(0, 0, hdr4, HDR); ws4.set_row(0, 24)
     ws4.set_column(0, 0, 6)
     for ci, w in enumerate(pk_w): ws4.set_column(ci+1, ci+1, min(w, 36))
-    ws4.set_column(pk_n+1, pk_n+1, 32)
-    for i, pk_dict in enumerate(ex_rows):
-        ws4.write(i+1, 0, i+1, NUM)
-        for ci, c in enumerate(pk_cols):
-            ws4.write(i+1, ci+1, pk_dict.get(c, ""), PK)
-        ws4.write(i+1, pk_n+1, f"ไม่มีใน {src_label} แต่มีใน {tgt_label}", NOTE)
+    ws4.set_column(pk_n+1, pk_n+1, 22)
+    ws4.set_column(pk_n+2, pk_n+2, 28); ws4.set_column(pk_n+3, pk_n+3, 28)
+
+    r = 1
+    for grp_i, grp in enumerate(ex_groups):
+        pk_vals = [grp["pk"].get(c, "") for c in pk_cols]
+        nrows   = len(grp["fields"]) or 1
+
+        if nrows > 1:
+            ws4.merge_range(r, 0, r+nrows-1, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws4.merge_range(r, ci+1, r+nrows-1, ci+1, v, PK)
+        else:
+            ws4.write(r, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws4.write(r, ci+1, v, PK)
+
+        for fi, (col, src, tgt) in enumerate(grp["fields"]):
+            ws4.write(r+fi, pk_n+1, col, EX)
+            ws4.write(r+fi, pk_n+2, src or "-", EX)
+            ws4.write(r+fi, pk_n+3, tgt or "-", EX)
+
+        r += nrows
 
     wb.close()
     buf.seek(0)

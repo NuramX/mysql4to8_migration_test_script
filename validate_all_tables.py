@@ -190,6 +190,37 @@ try:
 except Exception:
     _TS_FIELD_CONFIG = {}
 
+def _configured_ts_col(table: str, db: str = None) -> str | None:
+    """Column explicitly configured in ts_field_config.json for this table, if any.
+
+    Unlike _window_ts_col(), this has no PK-date fallback and does not depend on
+    --window being active — it's used to decide what to show in the Missing/Extra
+    report remark regardless of whether a date-range filter is applied.
+    """
+    return _TS_FIELD_CONFIG.get(db or DATABASE, {}).get(table)
+
+def _write_missing_extra_detail(csv_writer, rtype: str, pk_str: str,
+                                 all_cols: list[str], row, ts_col: str | None):
+    """Write one CSV row per column detail for a missing/extra pk (mirrors the
+    per-column layout used for mismatch rows, so the report sheet can show
+    the same Column Name / Value grid).
+
+    If the table has a configured date-range column, only that column is
+    written so the reader can locate where the data breaks. Otherwise every
+    column of the table is written.
+    """
+    if row is None or csv_writer is None:
+        return
+    cols = [ts_col] if (ts_col and ts_col in all_cols) else all_cols
+    idx_map = {c: i for i, c in enumerate(all_cols)}
+    for c in cols:
+        v = row[idx_map[c]]
+        val = str(v) if v is not None else "NULL"
+        if rtype == "missing":
+            csv_writer.writerow(["missing", pk_str, c, val, ""])
+        else:
+            csv_writer.writerow(["extra", pk_str, c, "", val])
+
 def _window_ts_col(entry: dict) -> str | None:
     """Return the column used to apply the year-range window for this table.
 
@@ -836,7 +867,8 @@ def _keyset_stream(fetch, table: str, pk_cols: list[str], all_cols: list[str],
 def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                      src, where: str, src_rows_est: int,
                      window_label: str | None = None,
-                     ts_col: str | None = None) -> dict:
+                     ts_col: str | None = None,
+                     remark_ts_col: str | None = None) -> dict:
     """Two-pointer merge on filtered rows. Returns result dict.
     Reuses the caller's src connection — MySQL 4 only allows 1 concurrent
     connection per user, so opening a second one blocks indefinitely.
@@ -1025,8 +1057,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                     total_src += 1; missing += 1
                     pk_dict = {pk_cols[j]: s_pk[j] for j in range(pk_n)}
                     pk_str = ", ".join(f"{k}={v}" for k, v in pk_dict.items())
-                    if csv_writer:
-                        csv_writer.writerow(["missing", pk_str, "ALL", "Present in Source", "Missing in Target"])
+                    _write_missing_extra_detail(csv_writer, "missing", pk_str, all_cols, s_row, remark_ts_col)
                     if ndjson_file:
                         ndjson_file.write(json.dumps({
                             "type": "missing", "pk": pk_str,
@@ -1049,8 +1080,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                     total_tgt += 1; extra += 1
                     pk_dict = {pk_cols[j]: t_pk[j] for j in range(pk_n)}
                     pk_str = ", ".join(f"{k}={v}" for k, v in pk_dict.items())
-                    if csv_writer:
-                        csv_writer.writerow(["extra", pk_str, "ALL", "Missing in Source", "Extra in Target"])
+                    _write_missing_extra_detail(csv_writer, "extra", pk_str, all_cols, t_row, remark_ts_col)
                     if ndjson_file:
                         ndjson_file.write(json.dumps({
                             "type": "extra", "pk": pk_str,
@@ -1074,8 +1104,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                 s_pk_val = pk_of(s_row)
                 pk_dict = {pk_cols[j]: s_pk_val[j] for j in range(pk_n)}
                 pk_str = ", ".join(f"{k}={v}" for k, v in pk_dict.items())
-                if csv_writer:
-                    csv_writer.writerow(["missing", pk_str, "ALL", "Present in Source", "Missing in Target"])
+                _write_missing_extra_detail(csv_writer, "missing", pk_str, all_cols, s_row, remark_ts_col)
                 if ndjson_file:
                     ndjson_file.write(json.dumps({
                         "type": "missing", "pk": pk_str,
@@ -1099,8 +1128,7 @@ def _stream_compare(table: str, pk_cols: list[str], all_cols: list[str],
                 t_pk_val = pk_of(t_row)
                 pk_dict = {pk_cols[j]: t_pk_val[j] for j in range(pk_n)}
                 pk_str = ", ".join(f"{k}={v}" for k, v in pk_dict.items())
-                if csv_writer:
-                    csv_writer.writerow(["extra", pk_str, "ALL", "Missing in Source", "Extra in Target"])
+                _write_missing_extra_detail(csv_writer, "extra", pk_str, all_cols, t_row, remark_ts_col)
                 if ndjson_file:
                     ndjson_file.write(json.dumps({
                         "type": "extra", "pk": pk_str,
@@ -1180,7 +1208,8 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
 
         result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est,
                                  window_label=_window_label() if window else None,
-                                 ts_col=ts_col)
+                                 ts_col=ts_col,
+                                 remark_ts_col=_configured_ts_col(table))
 
         has_errors = (result["mismatches"] > 0 or
                       result["missing_in_tgt"] > 0 or
