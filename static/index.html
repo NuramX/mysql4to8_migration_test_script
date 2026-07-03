@@ -2337,7 +2337,6 @@
               title="เปรียบเทียบข้อมูลแถวต่อแถว: รันสแกนตรวจสอบข้อมูลเชิงลึกเปรียบเทียบค่าทุกฟิลด์ในทุกแถวแบบ 100% ว่าตรงกันจริง"
               style="text-align:center">Full Sync Check</th>
             <th>Error Summary</th>
-            <th style="width:50px; text-align:center">SQL</th>
           </tr>
         </thead>
         <tbody id="at-tbody"></tbody>
@@ -3506,9 +3505,6 @@
       <td onclick="atToggleRowDetails('${key}')"><span class="at-rows">${tgtRows}</span></td>
       ${CHECK_KEYS.map(k => `<td style="text-align:center" onclick="atToggleRowDetails('${key}')">${atBadge(checks[k])}</td>`).join('')}
       <td class="at-detail-cell" onclick="atToggleRowDetails('${key}')"><code title="${detail}">${detail || '—'}</code></td>
-      <td style="text-align:center" onclick="event.stopPropagation()">
-        ${isFirst ? `<button class="sql-table-btn" onclick="sqlOpen('${table}')" title="SQL">SQL</button>` : ''}
-      </td>
     </tr>`);
       });
 
