@@ -1903,6 +1903,12 @@
       color: var(--text);
       font-size: 12px;
       cursor: pointer;
+      color-scheme: dark;
+    }
+
+    .sql-select option {
+      background: var(--bg-secondary, #161b22);
+      color: var(--text);
     }
 
     .sql-textarea {
@@ -4988,6 +4994,7 @@
       const panel   = document.getElementById('sc-panel');
 
       if (!sql) { status.textContent = 'SQL is empty.'; return; }
+      if (!table) { status.textContent = '⚠ กรุณาเลือก Table ก่อน Run Compare — ระบบใช้ PK จาก schema ของ table นี้ เพื่อไม่ให้ผลเพี้ยนจากการ compare'; return; }
       if (_scEs) { _scEs.close(); _scEs = null; }
 
       btn.disabled = true;

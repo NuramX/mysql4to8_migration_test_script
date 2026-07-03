@@ -1627,12 +1627,14 @@ def download_excel(table):
     # ── Pass 1: discover PK columns + collect all grouped data ───────────
     pk_cols = []
     mm_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
-    ms_rows   = []   # [pk_dict]
-    ex_rows   = []   # [pk_dict]
+    ms_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
+    ex_groups = []   # [{pk_dict, fields: [(col,src,tgt)]}]
 
-    cur_key = None
-    cur_pk  = None
-    cur_fields = []
+    _cur = {
+        "mismatch": {"key": None, "pk": None, "fields": [], "out": mm_groups},
+        "missing":  {"key": None, "pk": None, "fields": [], "out": ms_groups},
+        "extra":    {"key": None, "pk": None, "fields": [], "out": ex_groups},
+    }
 
     def parse_pk(pk_str):
         d = {}
@@ -1644,9 +1646,10 @@ def download_excel(table):
                     pk_cols.append(kv[0])
         return d
 
-    def flush_mm():
-        if cur_key and cur_fields:
-            mm_groups.append({"pk": cur_pk, "fields": cur_fields[:]})
+    def flush(rtype):
+        c = _cur[rtype]
+        if c["key"] and c["fields"]:
+            c["out"].append({"pk": c["pk"], "fields": c["fields"][:]})
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv_mod.reader(f)
@@ -1656,18 +1659,16 @@ def download_excel(table):
                 continue
             rtype, pk_str, col, src_val, tgt_val = row[0], row[1], row[2], row[3], row[4]
             pk_dict = parse_pk(pk_str)
-            if rtype == "mismatch":
-                key = pk_str
-                if key != cur_key:
-                    flush_mm()
-                    cur_key, cur_pk, cur_fields = key, pk_dict, []
-                if col != "ALL":
-                    cur_fields.append((col, src_val, tgt_val))
-            elif rtype == "missing":
-                ms_rows.append(pk_dict)
-            elif rtype == "extra":
-                ex_rows.append(pk_dict)
-    flush_mm()
+            if rtype not in _cur:
+                continue
+            c = _cur[rtype]
+            key = pk_str
+            if key != c["key"]:
+                flush(rtype)
+                c["key"], c["pk"], c["fields"] = key, pk_dict, []
+            if col != "ALL":
+                c["fields"].append((col, src_val, tgt_val))
+    flush("mismatch"); flush("missing"); flush("extra")
 
     # ── Build workbook ────────────────────────────────────────────────────
     buf = io.BytesIO()
@@ -1699,7 +1700,6 @@ def download_excel(table):
 
     NUM  = fmt(font_color="#9CA3AF", font_size=9, border=1, border_color="#E5E7EB",
                align="center", valign="vcenter")
-    NOTE = fmt(font_color="#6B7280", italic=True, border=1, border_color="#E5E7EB", valign="vcenter")
 
     # ── Sheet 1: Summary ─────────────────────────────────────────────────
     ws = wb.add_worksheet("📊 Summary")
@@ -1759,33 +1759,67 @@ def download_excel(table):
 
         r += nrows
 
-    # ── Sheet 3: Missing ─────────────────────────────────────────────────
+    # ── Sheet 3: Missing (merged PK cells, mismatch-style grid) ──────────
     ws3 = wb.add_worksheet("🟡 Missing")
     ws3.hide_gridlines(2); ws3.freeze_panes(1, 0)
-    hdr3 = ["#"] + pk_cols + ["หมายเหตุ"]
+    hdr3 = ["#"] + pk_cols + ["Column Name", src_label, tgt_label]
     ws3.write_row(0, 0, hdr3, HDR); ws3.set_row(0, 24)
     ws3.set_column(0, 0, 6)
     for ci, w in enumerate(pk_w): ws3.set_column(ci+1, ci+1, min(w, 36))
-    ws3.set_column(pk_n+1, pk_n+1, 32)
-    for i, pk_dict in enumerate(ms_rows):
-        ws3.write(i+1, 0, i+1, NUM)
-        for ci, c in enumerate(pk_cols):
-            ws3.write(i+1, ci+1, pk_dict.get(c, ""), PK)
-        ws3.write(i+1, pk_n+1, f"มีใน {src_label} แต่ไม่มีใน {tgt_label}", NOTE)
+    ws3.set_column(pk_n+1, pk_n+1, 22)
+    ws3.set_column(pk_n+2, pk_n+2, 28); ws3.set_column(pk_n+3, pk_n+3, 28)
 
-    # ── Sheet 4: Extra ───────────────────────────────────────────────────
+    r = 1
+    for grp_i, grp in enumerate(ms_groups):
+        pk_vals = [grp["pk"].get(c, "") for c in pk_cols]
+        nrows   = len(grp["fields"]) or 1
+
+        if nrows > 1:
+            ws3.merge_range(r, 0, r+nrows-1, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws3.merge_range(r, ci+1, r+nrows-1, ci+1, v, PK)
+        else:
+            ws3.write(r, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws3.write(r, ci+1, v, PK)
+
+        for fi, (col, src, tgt) in enumerate(grp["fields"]):
+            ws3.write(r+fi, pk_n+1, col, MS)
+            ws3.write(r+fi, pk_n+2, src or "-", MS)
+            ws3.write(r+fi, pk_n+3, tgt or "-", MS)
+
+        r += nrows
+
+    # ── Sheet 4: Extra (merged PK cells, mismatch-style grid) ────────────
     ws4 = wb.add_worksheet("🔵 Extra")
     ws4.hide_gridlines(2); ws4.freeze_panes(1, 0)
-    hdr4 = ["#"] + pk_cols + ["หมายเหตุ"]
+    hdr4 = ["#"] + pk_cols + ["Column Name", src_label, tgt_label]
     ws4.write_row(0, 0, hdr4, HDR); ws4.set_row(0, 24)
     ws4.set_column(0, 0, 6)
     for ci, w in enumerate(pk_w): ws4.set_column(ci+1, ci+1, min(w, 36))
-    ws4.set_column(pk_n+1, pk_n+1, 32)
-    for i, pk_dict in enumerate(ex_rows):
-        ws4.write(i+1, 0, i+1, NUM)
-        for ci, c in enumerate(pk_cols):
-            ws4.write(i+1, ci+1, pk_dict.get(c, ""), PK)
-        ws4.write(i+1, pk_n+1, f"ไม่มีใน {src_label} แต่มีใน {tgt_label}", NOTE)
+    ws4.set_column(pk_n+1, pk_n+1, 22)
+    ws4.set_column(pk_n+2, pk_n+2, 28); ws4.set_column(pk_n+3, pk_n+3, 28)
+
+    r = 1
+    for grp_i, grp in enumerate(ex_groups):
+        pk_vals = [grp["pk"].get(c, "") for c in pk_cols]
+        nrows   = len(grp["fields"]) or 1
+
+        if nrows > 1:
+            ws4.merge_range(r, 0, r+nrows-1, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws4.merge_range(r, ci+1, r+nrows-1, ci+1, v, PK)
+        else:
+            ws4.write(r, 0, grp_i+1, NUM)
+            for ci, v in enumerate(pk_vals):
+                ws4.write(r, ci+1, v, PK)
+
+        for fi, (col, src, tgt) in enumerate(grp["fields"]):
+            ws4.write(r+fi, pk_n+1, col, EX)
+            ws4.write(r+fi, pk_n+2, src or "-", EX)
+            ws4.write(r+fi, pk_n+3, tgt or "-", EX)
+
+        r += nrows
 
     wb.close()
     buf.seek(0)
@@ -1944,10 +1978,20 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
         tgt_conn = _connect_target(tgt_cfg, db)
 
         tgt_version = int(tgt_cfg.get("version", 8))
-        pk_cols = []
-        if table:
-            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
 
+        # No table selected in the dropdown — infer it from the SQL text so the
+        # real PK (from schema) is still used instead of falling back to
+        # "first SELECTed column", which silently collapses duplicate-key rows
+        # in the merge dict and produces wrong totals vs. Full Sync.
+        _type_table = table
+        if not _type_table:
+            _m = _re.search(r'\bFROM\s+`?(\w+)`?', strip_sql, _re.IGNORECASE)
+            if _m:
+                _type_table = _m.group(1)
+
+        pk_cols = []
+        if _type_table:
+            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, _type_table)
 
         src_conn = MySQL40Connection(
             host=src_cfg["host"], port=int(src_cfg["port"]),
@@ -1956,12 +2000,6 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
         )
         src_cols, _ = src_conn.query_with_cols(f"{strip_sql} LIMIT 1")
         src_col_type_map = {}
-        _type_table = table
-        if not _type_table:
-            # No table selected — infer from SQL so BINARY is applied for string PKs
-            _m = _re.search(r'\bFROM\s+`?(\w+)`?', strip_sql, _re.IGNORECASE)
-            if _m:
-                _type_table = _m.group(1)
         if _type_table:
             try:
                 src_col_rows = src_conn.query(f"SHOW COLUMNS FROM `{_type_table}`")
@@ -1982,9 +2020,9 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
         common_cols = [c for c in src_cols if c in tgt_col_set]
 
         # Filter out ignored columns if a table is specified, but ALWAYS preserve PK columns
-        if table:
+        if _type_table:
             cfg = _load_config()
-            ignored = cfg.get("ignore_fields", {}).get(db, {}).get(table, [])
+            ignored = cfg.get("ignore_fields", {}).get(db, {}).get(_type_table, [])
             common_cols = [c for c in common_cols if c not in ignored or c in pk_cols]
 
         if not common_cols:
@@ -1999,6 +2037,27 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
             _sc_emit({"type": "error",
                       "message": f"PK column(s) {missing_pk} not in SELECT — add them to your query"})
             _sc_emit({"type": "done", "exit_code": 1}); return
+
+        # Column to call out in the Missing/Extra report when the table has one
+        # configured in ts_field_config.json; otherwise every common column is
+        # written so the reader can locate where the data breaks.
+        _ts_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts_field_config.json")
+        try:
+            with open(_ts_config_path, "r", encoding="utf-8") as _tf:
+                _sc_ts_config = json.load(_tf)
+        except Exception:
+            _sc_ts_config = {}
+        remark_ts_col = _sc_ts_config.get(db, {}).get(_type_table) if _type_table else None
+        remark_cols = [remark_ts_col] if (remark_ts_col and remark_ts_col in common_cols) else common_cols
+
+        def _write_me_row(csv_w, rtype, ps, vals_by_col):
+            for c in remark_cols:
+                v = vals_by_col.get(c)
+                val = v if v is not None else "NULL"
+                if rtype == "missing":
+                    csv_w.writerow(["missing", ps, c, val, ""])
+                else:
+                    csv_w.writerow(["extra", ps, c, "", val])
 
         # ── Build streaming SQL ───────────────────────────────────────────────
         _str_type_keywords = ("char", "text", "enum", "set", "varchar", "binary", "blob")
@@ -2121,7 +2180,7 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
                     _src = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
                     ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
                         "cols": common_cols, "src": _src}, ensure_ascii=False) + "\n")
-                    csv_w.writerow(["missing", pk_str(d), "ALL", "Present in Source", "Missing in Target"])
+                    _write_me_row(csv_w, "missing", pk_str(d), dict(zip(common_cols, _src)))
                     s_row = next(src_gen, None)
                 else:
                     extra += 1; total += 1
@@ -2129,7 +2188,7 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
                     _tgt = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
                     ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
                         "cols": common_cols, "tgt": _tgt}, ensure_ascii=False) + "\n")
-                    csv_w.writerow(["extra", pk_str(d), "ALL", "Missing in Source", "Extra in Target"])
+                    _write_me_row(csv_w, "extra", pk_str(d), dict(zip(common_cols, _tgt)))
                     t_row = next(t_iter, None)
 
             elif s_row is not None:
@@ -2138,7 +2197,7 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
                 _src = [str(s_row[c_src[i]]) if s_row[c_src[i]] is not None else None for i in range(len(common_cols))]
                 ndjson_f.write(json.dumps({"type": "missing", "pk": pk_str(d),
                     "cols": common_cols, "src": _src}, ensure_ascii=False) + "\n")
-                csv_w.writerow(["missing", pk_str(d), "ALL", "Present in Source", "Missing in Target"])
+                _write_me_row(csv_w, "missing", pk_str(d), dict(zip(common_cols, _src)))
                 s_row = next(src_gen, None)
             else:
                 extra += 1; total += 1
@@ -2146,7 +2205,7 @@ def _sc_worker(sql: str, table: str, db: str, target_name: str = None):
                 _tgt = [str(t_row[c_tgt[i]]) if t_row[c_tgt[i]] is not None else None for i in range(len(common_cols))]
                 ndjson_f.write(json.dumps({"type": "extra", "pk": pk_str(d),
                     "cols": common_cols, "tgt": _tgt}, ensure_ascii=False) + "\n")
-                csv_w.writerow(["extra", pk_str(d), "ALL", "Missing in Source", "Extra in Target"])
+                _write_me_row(csv_w, "extra", pk_str(d), dict(zip(common_cols, _tgt)))
                 t_row = next(t_iter, None)
 
             if total - last_prog >= PROG:
@@ -2306,9 +2365,19 @@ def sql_compare():
             return jsonify({"error": "No common columns between source and target result sets"}), 400
 
         tgt_version = int(tgt_cfg.get("version", 8))
+
+        # No table selected in the dropdown — infer it from the SQL text so the
+        # real PK (from schema) is still used instead of falling back to
+        # "first SELECTed column", which silently collapses duplicate-key rows.
+        _type_table = table
+        if not _type_table:
+            _m = _re.search(r'\bFROM\s+`?(\w+)`?', sql, _re.IGNORECASE)
+            if _m:
+                _type_table = _m.group(1)
+
         pk_cols = []
-        if table:
-            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, table)
+        if _type_table:
+            pk_cols = _get_tgt_pk_cols(tgt_conn, tgt_version, db, _type_table)
 
             missing_pk = [c for c in pk_cols if c not in set(common_cols)]
             if missing_pk:
