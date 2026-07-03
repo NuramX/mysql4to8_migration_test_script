@@ -86,8 +86,63 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       padding: 14px 0 10px;
-      gap: 16px;
+      gap: 24px;
+      row-gap: 12px;
+    }
+
+    .ov-nav-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .ov-options-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 20px;
+      row-gap: 10px;
+      padding: 10px 0 14px;
+      border-top: 1px solid var(--border);
+    }
+
+    .ov-options-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .ov-options-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .ov-checkbox {
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    .ov-checkbox input {
+      cursor: pointer;
+    }
+
+    .ov-range-sep {
+      color: var(--muted);
+    }
+
+    .ov-run-btn {
+      margin-left: auto;
     }
 
     .ov-title {
@@ -1979,7 +2034,7 @@
         </div>
         <span style="font-size:12px;color:var(--muted);font-weight:400" id="at-run-time"></span>
       </div>
-      <div style="display:flex;align-items:center;gap:12px">
+      <div class="ov-nav-group">
         <button class="sql-runner-btn" onclick="sqlOpen(null)">
           <span>🔍 SQL Runner</span>
         </button>
@@ -1989,31 +2044,35 @@
         <button id="at-settings-btn" onclick="atOpenSettingsDrawer()" class="settings-btn">
           <span>⚙️ Connections</span>
         </button>
-        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="at-skip-sync" checked style="cursor:pointer">
+      </div>
+    </div>
+    <div class="ov-options-row">
+      <div class="ov-options-group">
+        <span class="ov-options-label">Validation options:</span>
+        <label class="ov-checkbox">
+          <input type="checkbox" id="at-skip-sync" checked>
           Skip Full Sync (fast mode)
         </label>
-        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="at-auto-sample" style="cursor:pointer">
+        <label class="ov-checkbox">
+          <input type="checkbox" id="at-auto-sample">
           Auto Random Sample
         </label>
-        <span style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px"
-          title="ตรวจเฉพาะข้อมูลช่วงปี/เดือนนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">
-          Data Range:
-          <select id="at-year-from" class="db-select" onchange="atOnYearChange('from',this.value)"></select>
-          <select id="at-month-from" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('from',this.value)"></select>
-          <select id="at-day-from" class="db-select" disabled style="opacity:0.4"></select>
-          –
-          <select id="at-year-to" class="db-select" onchange="atOnYearChange('to',this.value)"></select>
-          <select id="at-month-to" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('to',this.value)"></select>
-          <select id="at-day-to" class="db-select" disabled style="opacity:0.4"></select>
-        </span>
-        <button id="at-run-btn" onclick="runAllTables()">
-          <div class="spinner"></div>
-          <span class="btn-icon">▶</span>
-          <span id="at-btn-text">Run Validation</span>
-        </button>
       </div>
+      <div class="ov-options-group">
+        <span class="ov-options-label" title="ตรวจเฉพาะข้อมูลช่วงปี/เดือนนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">Data Range:</span>
+        <select id="at-year-from" class="db-select" onchange="atOnYearChange('from',this.value)"></select>
+        <select id="at-month-from" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('from',this.value)"></select>
+        <select id="at-day-from" class="db-select" disabled style="opacity:0.4"></select>
+        <span class="ov-range-sep">–</span>
+        <select id="at-year-to" class="db-select" onchange="atOnYearChange('to',this.value)"></select>
+        <select id="at-month-to" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('to',this.value)"></select>
+        <select id="at-day-to" class="db-select" disabled style="opacity:0.4"></select>
+      </div>
+      <button id="at-run-btn" onclick="runAllTables()" class="ov-run-btn">
+        <div class="spinner"></div>
+        <span class="btn-icon">▶</span>
+        <span id="at-btn-text">Run Validation</span>
+      </button>
     </div>
     <div id="at-summary-bar">
       <div class="at-pill"><span class="at-pill-count pass" id="at-pill-pass">0</span><span
