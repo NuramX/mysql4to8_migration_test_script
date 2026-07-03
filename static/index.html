@@ -1797,6 +1797,43 @@
       color: var(--text);
     }
 
+    .sql-combo-list {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      max-height: 260px;
+      overflow-y: auto;
+      background: var(--bg-secondary, #161b22);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      z-index: 50;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+    }
+
+    .sql-combo-list.active { display: block; }
+
+    .sql-combo-item {
+      padding: 6px 10px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .sql-combo-item:hover,
+    .sql-combo-item.active {
+      background: var(--surface2);
+    }
+
+    .sql-combo-empty {
+      padding: 6px 10px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
     .sql-textarea {
       width: 100%;
       min-height: 110px;
@@ -2217,9 +2254,11 @@
       <div class="sql-toolbar" style="flex-shrink:0;border-bottom:1px solid var(--border)">
         <div class="sql-controls-row">
           <label style="font-size:12px;color:var(--muted);white-space:nowrap">Table:</label>
-          <select id="sc-table" class="sql-select" style="flex:1;font-family:'JetBrains Mono',monospace" onchange="scLoadColumns(this.value)">
-            <option value="">— เลือก table —</option>
-          </select>
+          <div class="sql-combo" style="flex:1;position:relative">
+            <input type="text" id="sc-table-search" class="sql-select" style="width:100%;font-family:'JetBrains Mono',monospace" placeholder="— เลือก table — (พิมพ์เพื่อค้นหา)" autocomplete="off" oninput="scFilterTables()" onfocus="scShowTableList()">
+            <div id="sc-table-list" class="sql-combo-list"></div>
+            <input type="hidden" id="sc-table" value="">
+          </div>
           <span id="sc-db-label" style="font-size:11px;color:var(--muted);white-space:nowrap;padding:0 6px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;height:28px;display:flex;align-items:center"></span>
         </div>
         <div id="sc-columns" style="display:none;flex-wrap:wrap;gap:5px;padding:4px 0"></div>
@@ -4556,9 +4595,11 @@
     };
     let _scEs = null;
 
+    let scTablesCache = [];
+
     async function scPopulateTables() {
-      const sel = document.getElementById('sc-table');
-      const prevVal = sel.value;
+      const hidden = document.getElementById('sc-table');
+      const prevVal = hidden.value;
 
       let tables = Object.keys(atResults).sort();
       if (!tables.length) tables = (atGetCachedTableList(activeDatabase) || []).slice().sort();
@@ -4574,18 +4615,51 @@
         } catch (e) {}
       }
 
-      sel.innerHTML = '<option value="">— เลือก table —</option>';
-      tables.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t;
-        opt.textContent = t;
-        if (t === prevVal) opt.selected = true;
-        sel.appendChild(opt);
-      });
+      scTablesCache = tables;
+      if (prevVal && tables.includes(prevVal)) {
+        document.getElementById('sc-table-search').value = prevVal;
+      } else {
+        hidden.value = '';
+        document.getElementById('sc-table-search').value = '';
+      }
 
       const lbl = document.getElementById('sc-db-label');
       if (lbl) lbl.textContent = activeDatabase;
     }
+
+    function scRenderTableList(filter) {
+      const list = document.getElementById('sc-table-list');
+      const q = (filter || '').trim().toLowerCase();
+      const matches = q ? scTablesCache.filter(t => t.toLowerCase().includes(q)) : scTablesCache;
+      if (!matches.length) {
+        list.innerHTML = '<div class="sql-combo-empty">ไม่พบ table</div>';
+      } else {
+        list.innerHTML = matches.map(t => `<div class="sql-combo-item" onmousedown="scSelectTable('${t.replace(/'/g, "\\'")}\')">${t}</div>`).join('');
+      }
+      list.classList.add('active');
+    }
+
+    function scShowTableList() {
+      scRenderTableList(document.getElementById('sc-table-search').value);
+    }
+
+    function scFilterTables() {
+      scRenderTableList(document.getElementById('sc-table-search').value);
+    }
+
+    function scSelectTable(table) {
+      document.getElementById('sc-table').value = table;
+      document.getElementById('sc-table-search').value = table;
+      document.getElementById('sc-table-list').classList.remove('active');
+      scLoadColumns(table);
+    }
+
+    document.addEventListener('click', (e) => {
+      const combo = document.querySelector('.sql-combo');
+      if (combo && !combo.contains(e.target)) {
+        document.getElementById('sc-table-list')?.classList.remove('active');
+      }
+    });
 
     async function scLoadColumns(table) {
       const box = document.getElementById('sc-columns');
