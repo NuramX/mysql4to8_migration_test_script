@@ -24,7 +24,9 @@
       "version": 4
     }
   ],
+  "active_target": "target_mysql8",
   "target": {
+    "name": "target_mysql8",
     "host": "TARGET_DB_HOST",
     "port": 3306,
     "user": "YOUR_USER",

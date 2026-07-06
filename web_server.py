@@ -425,6 +425,8 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 DEFAULT_CONFIG = {
     "source": {"host": "", "port": 3306, "user": "", "password": ""},
     "target": {"host": "", "port": 3306, "user": "", "password": ""},
+    "targets": [],
+    "active_target": None,
     "default_db": "prs",
 }
 
@@ -448,6 +450,79 @@ def _get_target_config(cfg):
     return t or DEFAULT_CONFIG["target"]
 
 
+def _ensure_targets_list(cfg):
+    """Migrate legacy single-`target` configs into the `targets[]` list in place."""
+    tgts = cfg.get("targets")
+    if not isinstance(tgts, list):
+        tgts = []
+        legacy = cfg.get("target")
+        if legacy and legacy.get("host"):
+            tgts.append({**legacy, "name": legacy.get("name") or "target"})
+            cfg["active_target"] = tgts[0]["name"]
+        cfg["targets"] = tgts
+    return tgts
+
+
+def _sync_active_target(cfg):
+    """Recompute the legacy `target` mirror from targets[] + active_target for old readers."""
+    tgts = cfg.get("targets") or []
+    active_name = cfg.get("active_target")
+    active = next((t for t in tgts if t.get("name") == active_name), None)
+    if active is None and tgts:
+        active = tgts[0]
+        cfg["active_target"] = active.get("name")
+    cfg["target"] = active or DEFAULT_CONFIG["target"]
+
+
+def _test_target_connection(conn):
+    """Test a target DB connection dict ({host, port, user, password, version}). Raises on failure."""
+    try:
+        if int(conn.get("version", 8)) == 4:
+            from mysql40 import MySQL40Connection
+            c = MySQL40Connection(
+                host=conn["host"],
+                port=int(conn["port"]),
+                user=conn["user"],
+                password=conn["password"],
+                database=conn.get("default_db", "prs"),
+                timeout=10
+            )
+            c.close()
+        else:
+            c = MySQLdb.connect(
+                host=conn["host"],
+                port=int(conn["port"]),
+                user=conn["user"],
+                passwd=conn["password"],
+                connect_timeout=10
+            )
+            c.close()
+    except Exception as e:
+        import socket as _sock
+        if isinstance(e, _sock.timeout):
+            raise ValueError(f"Target DB Connection Error: connection timed out ({conn.get('host')}:{conn.get('port')})")
+        raise ValueError(f"Target DB Connection Error: {str(e)}")
+
+
+def _test_source_connection(conn):
+    """Test the source DB connection dict. Source is always read over the MySQL4 protocol. Raises on failure."""
+    try:
+        from mysql40 import MySQL40Connection
+        c = MySQL40Connection(
+            host=conn["host"],
+            port=int(conn["port"]),
+            user=conn["user"],
+            password=conn["password"],
+            database=conn.get("default_db", "prs"),
+            timeout=10
+        )
+        c.close()
+    except Exception as e:
+        import socket as _sock
+        if isinstance(e, _sock.timeout):
+            raise ValueError(f"Source DB Connection Error: connection timed out ({conn.get('host')}:{conn.get('port')})")
+        raise ValueError(f"Source DB Connection Error: {str(e)}")
+
 
 def _save_config(cfg):
     try:
@@ -466,62 +541,22 @@ def get_config():
 
 @app.route("/api/config", methods=["POST"])
 def post_config():
+    """Save source connection, default_db, and numeric-comparison tuning.
+    Target connections are managed separately via /api/config/targets/*."""
     data = request.json or {}
     source = data.get("source", {})
-    target = data.get("target", {})
-    
-    # Validation
+
     for k in ["host", "port", "user", "password"]:
-        if k not in source or k not in target:
-            return jsonify({"error": f"Missing field '{k}' in configuration"}), 400
-    
-    # Test target connection
-    try:
-        if int(target.get("version", 8)) == 4:
-            from mysql40 import MySQL40Connection
-            t_conn = MySQL40Connection(
-                host=target["host"],
-                port=int(target["port"]),
-                user=target["user"],
-                password=target["password"],
-                database=data.get("default_db", "prs"),
-                timeout=10
-            )
-            t_conn.close()
-        else:
-            t_conn = MySQLdb.connect(
-                host=target["host"],
-                port=int(target["port"]),
-                user=target["user"],
-                passwd=target["password"],
-                connect_timeout=10
-            )
-            t_conn.close()
-    except Exception as e:
-        import socket as _sock
-        if isinstance(e, _sock.timeout):
-            return jsonify({"error": f"Target DB Connection Error: connection timed out ({target.get('host')}:{target.get('port')})"}), 400
-        return jsonify({"error": f"Target DB Connection Error: {str(e)}"}), 400
+        if k not in source:
+            return jsonify({"error": f"Missing field '{k}' in source configuration"}), 400
 
-    # Test source connection
+    source = dict(source, default_db=data.get("default_db", "prs"))
     try:
-        from mysql40 import MySQL40Connection
-        s_conn = MySQL40Connection(
-            host=source["host"],
-            port=int(source["port"]),
-            user=source["user"],
-            password=source["password"],
-            database=data.get("default_db", "prs"),
-            timeout=10
-        )
-        s_conn.close()
-    except Exception as e:
-        import socket as _sock
-        if isinstance(e, _sock.timeout):
-            return jsonify({"error": f"Source DB Connection Error: connection timed out ({source.get('host')}:{source.get('port')})"}), 400
-        return jsonify({"error": f"Source DB Connection Error: {str(e)}"}), 400
+        _test_source_connection(source)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    # Save configuration — merge over existing file so extra sections (tuning) survive
+    # Save configuration — merge over existing file so extra sections (targets, tuning) survive
     cfg = _load_config()
     cfg.update({
         "source": {
@@ -531,16 +566,8 @@ def post_config():
             "password": source["password"],
             "version": int(source.get("version", 4))
         },
-        "target": {
-            "host": target["host"],
-            "port": int(target["port"]),
-            "user": target["user"],
-            "password": target["password"],
-            "version": int(target.get("version", 8))
-        },
         "default_db": data.get("default_db", "prs")
     })
-
 
     # Optional numeric-comparison tuning from the Settings UI
     if "tuning" in data and isinstance(data["tuning"], dict):
@@ -566,6 +593,117 @@ def post_config():
         return jsonify({"success": True})
     else:
         return jsonify({"error": "Failed to write configuration file"}), 500
+
+
+@app.route("/api/config/targets", methods=["POST"])
+def post_config_target():
+    """Add a new target to targets[]. First target added becomes active automatically."""
+    data = request.json or {}
+    for k in ["name", "host", "port", "user", "password"]:
+        if k not in data or str(data[k]).strip() == "":
+            return jsonify({"error": f"Missing field '{k}' in target configuration"}), 400
+
+    cfg = _load_config()
+    tgts = _ensure_targets_list(cfg)
+    name = data["name"].strip()
+    if any(t.get("name") == name for t in tgts):
+        return jsonify({"error": f"A target named '{name}' already exists"}), 400
+
+    entry = {
+        "name": name,
+        "host": data["host"].strip(),
+        "port": int(data["port"]),
+        "user": data["user"],
+        "password": data["password"],
+        "version": int(data.get("version", 8)),
+    }
+    try:
+        _test_target_connection(dict(entry, default_db=cfg.get("default_db", "prs")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    tgts.append(entry)
+    if not cfg.get("active_target"):
+        cfg["active_target"] = name
+    _sync_active_target(cfg)
+
+    if _save_config(cfg):
+        return jsonify({"success": True, "targets": tgts, "active_target": cfg["active_target"]})
+    return jsonify({"error": "Failed to write configuration file"}), 500
+
+
+@app.route("/api/config/targets/<name>", methods=["PUT"])
+def put_config_target(name):
+    """Edit an existing target (identified by its current name)."""
+    data = request.json or {}
+    for k in ["name", "host", "port", "user", "password"]:
+        if k not in data or str(data[k]).strip() == "":
+            return jsonify({"error": f"Missing field '{k}' in target configuration"}), 400
+
+    cfg = _load_config()
+    tgts = _ensure_targets_list(cfg)
+    idx = next((i for i, t in enumerate(tgts) if t.get("name") == name), None)
+    if idx is None:
+        return jsonify({"error": f"Target '{name}' not found"}), 404
+
+    new_name = data["name"].strip()
+    if new_name != name and any(t.get("name") == new_name for t in tgts):
+        return jsonify({"error": f"A target named '{new_name}' already exists"}), 400
+
+    entry = {
+        "name": new_name,
+        "host": data["host"].strip(),
+        "port": int(data["port"]),
+        "user": data["user"],
+        "password": data["password"],
+        "version": int(data.get("version", 8)),
+    }
+    try:
+        _test_target_connection(dict(entry, default_db=cfg.get("default_db", "prs")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    tgts[idx] = entry
+    if cfg.get("active_target") == name:
+        cfg["active_target"] = new_name
+    _sync_active_target(cfg)
+
+    if _save_config(cfg):
+        return jsonify({"success": True, "targets": tgts, "active_target": cfg["active_target"]})
+    return jsonify({"error": "Failed to write configuration file"}), 500
+
+
+@app.route("/api/config/targets/<name>", methods=["DELETE"])
+def delete_config_target(name):
+    cfg = _load_config()
+    tgts = _ensure_targets_list(cfg)
+    idx = next((i for i, t in enumerate(tgts) if t.get("name") == name), None)
+    if idx is None:
+        return jsonify({"error": f"Target '{name}' not found"}), 404
+
+    tgts.pop(idx)
+    if cfg.get("active_target") == name:
+        cfg["active_target"] = tgts[0]["name"] if tgts else None
+    _sync_active_target(cfg)
+
+    if _save_config(cfg):
+        return jsonify({"success": True, "targets": tgts, "active_target": cfg["active_target"]})
+    return jsonify({"error": "Failed to write configuration file"}), 500
+
+
+@app.route("/api/config/targets/<name>/activate", methods=["POST"])
+def activate_config_target(name):
+    cfg = _load_config()
+    tgts = _ensure_targets_list(cfg)
+    if not any(t.get("name") == name for t in tgts):
+        return jsonify({"error": f"Target '{name}' not found"}), 404
+
+    cfg["active_target"] = name
+    _sync_active_target(cfg)
+
+    if _save_config(cfg):
+        return jsonify({"success": True, "targets": tgts, "active_target": cfg["active_target"]})
+    return jsonify({"error": "Failed to write configuration file"}), 500
 
 
 @app.route("/api/config/ignore-fields", methods=["POST"])
