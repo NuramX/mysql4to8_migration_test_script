@@ -6,3 +6,4 @@ static/reports/
 .venv/
 timestamp_pk_columns.csv
 Timestamp Range & Row Count_condition.*
+docs/
