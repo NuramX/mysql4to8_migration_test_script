@@ -2447,6 +2447,10 @@
         </div>
         <textarea id="sql-input" class="sql-textarea" placeholder="SELECT * FROM `table_name` LIMIT 100"
           spellcheck="false"></textarea>
+        <div style="font-size:11px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 10px;line-height:1.6">
+          ✓ <strong>ใช้ได้:</strong> SELECT / SHOW / DESCRIBE / EXPLAIN เท่านั้น — รวม GROUP BY, JOIN, subquery, aggregate function ได้ปกติ เพราะรันตรงๆ ไม่มีการแก้ query เพิ่ม (ไม่มี LIMIT ก็เติมให้อัตโนมัติ)<br>
+          ✗ <strong>ใช้ไม่ได้:</strong> INSERT/UPDATE/DELETE/DROP หรือคำสั่งเขียนข้อมูลใดๆ — ระบบ block ตั้งแต่ระดับ whitelist เพราะเครื่องมือนี้อ่านอย่างเดียว
+        </div>
         <div style="display:flex; align-items:center; gap:10px">
           <button class="sql-run-btn" id="sql-run-btn" onclick="sqlRun()">
             <span id="sql-btn-icon">▶</span>
@@ -2485,6 +2489,10 @@
         <div style="font-size:11px;color:var(--warn);background:rgba(227,179,65,0.08);border:1px solid rgba(227,179,65,0.3);border-radius:5px;padding:7px 10px;line-height:1.6">
           ⚠ <strong>ต้อง SELECT Primary Key ทุกครั้ง</strong> — ระบบใช้ PK เพื่อ match แถวระหว่าง Source กับ Target<br>
           <span style="color:var(--muted)">ถ้า SELECT ไม่รวม PK จะเกิด error "PK column(s) not in SELECT result" — ดู chip สีม่วงด้านบนว่า PK ของ table นี้คืออะไร</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 10px;line-height:1.6">
+          ✓ <strong>ใช้ได้:</strong> SELECT แถวดิบระดับ row-level พร้อม WHERE เงื่อนไขอะไรก็ได้ — ระบบ match แต่ละแถว source/target ด้วย PK ตรงๆ<br>
+          ✗ <strong>ใช้ไม่ได้: GROUP BY / aggregate function (COUNT, SUM, AVG, ...)</strong> — ระบบเติม <code>ORDER BY pk</code> ต่อท้าย query ให้อัตโนมัติเสมอ ถ้า query สรุปผลแล้ว (ไม่มี PK ต่อแถวจริง) จะ error หรือได้ผลไม่ตรงเจตนา ต้องการเทียบผลสรุปแบบนี้ ให้ใช้ <strong>SQL Runner</strong> แทน (รันแยกสองฝั่งดูเทียบเอง ไม่มี auto ORDER BY มายุ่ง)
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           <button class="sql-run-btn" id="sc-run-btn" onclick="scRun()" style="background:var(--pass)">
