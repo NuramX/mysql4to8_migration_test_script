@@ -646,6 +646,53 @@
       text-overflow: ellipsis;
     }
 
+    .at-today-cell {
+      text-align: center;
+    }
+
+    .at-today-switch {
+      position: relative;
+      display: inline-block;
+      width: 32px;
+      height: 18px;
+      vertical-align: middle;
+      cursor: pointer;
+    }
+
+    .at-today-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .at-today-switch .at-today-slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      transition: 0.15s;
+      border-radius: 999px;
+    }
+
+    .at-today-switch .at-today-slider::before {
+      content: "";
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 2px;
+      top: 2px;
+      background: var(--text);
+      transition: 0.15s;
+      border-radius: 50%;
+    }
+
+    .at-today-switch input:checked+.at-today-slider {
+      background: var(--blue);
+    }
+
+    .at-today-switch input:checked+.at-today-slider::before {
+      transform: translateX(14px);
+    }
+
     #at-placeholder {
       text-align: center;
       padding: 60px 24px;
@@ -2145,6 +2192,8 @@
               title="เปรียบเทียบข้อมูลแถวต่อแถว: รันสแกนตรวจสอบข้อมูลเชิงลึกเปรียบเทียบค่าทุกฟิลด์ในทุกแถวแบบ 100% ว่าตรงกันจริง"
               style="text-align:center">Full Sync Check</th>
             <th>Error Summary</th>
+            <th title="เปิด: ตรวจข้อมูลได้ถึงวันนี้ (รวมวันนี้) / ปิด (ค่าเริ่มต้น): ตรวจถึงสิ้นวันเมื่อวาน"
+              style="text-align:center">Include Today</th>
           </tr>
         </thead>
         <tbody id="at-tbody"></tbody>
@@ -2387,6 +2436,7 @@
     const atResults = {};
     const atCounts = { pass: 0, fail: 0, warn: 0, skip: 0 };
     const atSelected = new Set();   // selected table names for full sync
+    const atTodayOverride = new Set();   // tables with "include today" toggle ON (default OFF)
     const atTsInfoCache = {};       // table -> ts-info result (persists across SSE re-renders)
 
     // Per-DB result store — saves/restores atResults+atCounts when switching databases
@@ -3309,6 +3359,10 @@
       atUpdateSelBar();
     }
 
+    function atToggleTodayOverride(table, checked) {
+      if (checked) atTodayOverride.add(table); else atTodayOverride.delete(table);
+    }
+
     function atToggleAll(checked) {
       document.querySelectorAll('#at-tbody input[type=checkbox]').forEach(cb => {
         const table = cb.closest('tr').querySelector('.at-tname').textContent;
@@ -3350,6 +3404,7 @@
         const srcRows = d.src_rows != null ? d.src_rows.toLocaleString() : '—';
         const tgtRows = d.tgt_rows != null ? d.tgt_rows.toLocaleString() : '—';
         const checked = atSelected.has(table) ? 'checked' : '';
+        const todayOn = atTodayOverride.has(table) ? 'checked' : '';
 
         htmlBuffer.push(`<tr class="at-row ${st}-row">
       <td style="text-align:center; position:relative; z-index:10" onclick="event.stopPropagation()">
@@ -3360,6 +3415,12 @@
       <td onclick="atToggleRowDetails('${table}')"><span class="at-rows">${tgtRows}</span></td>
       ${CHECK_KEYS.map(k => `<td style="text-align:center" onclick="atToggleRowDetails('${table}')">${atBadge(checks[k])}</td>`).join('')}
       <td class="at-detail-cell" onclick="atToggleRowDetails('${table}')"><code title="${detail}">${detail || '—'}</code></td>
+      <td class="at-today-cell" onclick="event.stopPropagation()">
+        <label class="at-today-switch" title="เปิด: ตรวจข้อมูลได้ถึงวันนี้ / ปิด: ตรวจถึงสิ้นวันเมื่อวาน (ค่าเริ่มต้น)">
+          <input type="checkbox" ${todayOn} onchange="atToggleTodayOverride('${table}',this.checked)">
+          <span class="at-today-slider"></span>
+        </label>
+      </td>
     </tr>`);
       });
 
@@ -3595,7 +3656,7 @@
       const resp = await fetch('/api/all-tables/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ db: activeDatabase, skip_sync: false, tables: [...atSelected], ...atYearWindow() })
+        body: JSON.stringify({ db: activeDatabase, skip_sync: false, tables: [...atSelected], today_tables: [...atTodayOverride], ...atYearWindow() })
       });
       if (!resp.ok) {
         alert('Failed to start sync');
@@ -3657,7 +3718,7 @@
       const resp = await fetch('/api/all-tables/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ db: activeDatabase, skip_sync: true, tables: [...atSelected], ...atYearWindow() })
+        body: JSON.stringify({ db: activeDatabase, skip_sync: true, tables: [...atSelected], today_tables: [...atTodayOverride], ...atYearWindow() })
       });
       if (!resp.ok) {
         alert('Failed to start quick scan');
@@ -3731,6 +3792,7 @@
           db: activeDatabase,
           skip_sync: skipSync,
           ...(selectedTables ? { tables: selectedTables } : {}),
+          today_tables: [...atTodayOverride],
           ...atYearWindow()
         })
       });

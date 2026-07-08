@@ -71,6 +71,14 @@ elif "--sync-tables" in sys.argv:
         TABLES_FILTER = set(sys.argv[idx + 1].split(","))
         SYNC_ONLY_MODE = True
 
+# --today-tables TABLE1,TABLE2 — per-table override: extend that table's window
+# end bound through today (inclusive) instead of the default end-of-yesterday cap.
+TODAY_OVERRIDE_TABLES: set[str] = set()
+if "--today-tables" in sys.argv:
+    idx = sys.argv.index("--today-tables")
+    if idx + 1 < len(sys.argv):
+        TODAY_OVERRIDE_TABLES = set(t for t in sys.argv[idx + 1].split(",") if t)
+
 DECIMAL_TOL   = Decimal(str(_tuning.get("decimal_tol", "0.0001")))
 # decimal_round: round both sides to N decimal places before comparing
 # (takes precedence over decimal_tol). None/absent = use tolerance.
@@ -138,6 +146,8 @@ def _month_end_exclusive(year: int, month: int, day: int | None = None) -> str:
 
 _today      = _datetime.date.today()
 _base_year  = _today.year
+# Exclusive upper bound covering all of today — used for per-table --today-tables override.
+_TODAY_END  = (_today + _datetime.timedelta(days=1)).isoformat()
 
 if _year_from is not None:
     _yfrom = _year_from
@@ -162,19 +172,20 @@ else:
     # No explicit upper bound → default cap is today (exclude today's data).
     WINDOW_END = _today.isoformat()
 
-def _window_label() -> str:
+def _window_label(table: str | None = None) -> str:
     """Human-readable range for summaries, e.g. '2024-03-01 → 2024-06-30'."""
-    if WINDOW_START and WINDOW_END:
-        # compute last day of window for display (WINDOW_END is exclusive)
+    end = _TODAY_END if (table and table in TODAY_OVERRIDE_TABLES) else WINDOW_END
+    if WINDOW_START and end:
+        # compute last day of window for display (end is exclusive)
         import datetime as _dt
-        _end_excl = _dt.date.fromisoformat(WINDOW_END)
+        _end_excl = _dt.date.fromisoformat(end)
         _last_day = (_end_excl - _dt.timedelta(days=1)).isoformat()
         return f"{WINDOW_START} → {_last_day}"
     if WINDOW_START:
         return f"≥{WINDOW_START}"
-    if WINDOW_END:
+    if end:
         import datetime as _dt
-        _end_excl = _dt.date.fromisoformat(WINDOW_END)
+        _end_excl = _dt.date.fromisoformat(end)
         _last_day = (_end_excl - _dt.timedelta(days=1)).isoformat()
         return f"≤{_last_day}"
     return ""
@@ -244,15 +255,20 @@ def _window_ts_col(entry: dict) -> str | None:
             return c
     return None
 
-def _window_cond(ts_col: str | None) -> str:
-    """Bare condition (no WHERE keyword) limiting rows to the data window."""
+def _window_cond(ts_col: str | None, table: str | None = None) -> str:
+    """Bare condition (no WHERE keyword) limiting rows to the data window.
+
+    If `table` is in TODAY_OVERRIDE_TABLES, the upper bound is extended through
+    today (inclusive) instead of the default end-of-yesterday cap.
+    """
     if not ts_col:
         return ""
+    end = _TODAY_END if (table and table in TODAY_OVERRIDE_TABLES) else WINDOW_END
     conds = []
     if WINDOW_START:
         conds.append(f"`{ts_col}` >= '{WINDOW_START}'")
-    if WINDOW_END:
-        conds.append(f"`{ts_col}` < '{WINDOW_END}'")
+    if end:
+        conds.append(f"`{ts_col}` < '{end}'")
     return " AND ".join(conds)
 PASS = "PASS"; FAIL = "FAIL"; WARN = "WARN"; SKIP = "SKIP"
 _print_lock   = threading.Lock()   # serialise print() across worker threads
@@ -539,16 +555,16 @@ def _load_tgt_schema_cache(tgt, db: str) -> tuple[dict, dict]:
 # ─── CHECK: Row Count ─────────────────────────────────────────────────────────
 def check_row_count(table: str, src, tgt, ts_col: str | None = None):
     try:
-        cond = _window_cond(ts_col)
+        cond = _window_cond(ts_col, table)
         s = _src_row_count(src, table, cond)
         t = _tgt_row_count(tgt, table, cond)
         diff = s - t
         status = PASS if s == t else FAIL
-        note = f"  (window: `{ts_col}` {_window_label()})" if cond else ""
+        note = f"  (window: `{ts_col}` {_window_label(table)})" if cond else ""
         _emit(table, "row_count", "Row Count", status, {
             "summary": f"source={s:,}  target={t:,}  diff={diff:+,}{note}",
             "source": s, "target": t, "diff": diff,
-            "window": _window_label() if cond else None,
+            "window": _window_label(table) if cond else None,
         })
         return s
     except Exception as e:
@@ -1202,12 +1218,12 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
         return
 
     try:
-        window   = _window_cond(ts_col)
-        win_note = f", window {_window_label()}" if window else ""
+        window   = _window_cond(ts_col, table)
+        win_note = f", window {_window_label(table)}" if window else ""
         where    = f"WHERE {window}" if window else ""
 
         result = _stream_compare(table, pk_cols, all_cols, src, where, src_rows_est,
-                                 window_label=_window_label() if window else None,
+                                 window_label=_window_label(table) if window else None,
                                  ts_col=ts_col,
                                  remark_ts_col=_configured_ts_col(table))
 
@@ -1225,7 +1241,7 @@ def check_full_sync(table: str, pk_cols: list[str], all_cols: list[str],
                 f"{win_note}"
             ),
             **result, "method": "stream",
-            "window": _window_label() if window else None,
+            "window": _window_label(table) if window else None,
         })
 
     except Exception as e:
@@ -1253,7 +1269,7 @@ def _process_table(table: str, src_cache: dict,
     try:
         src_rows = 0
         try:
-            src_rows = _src_row_count(src, table, _window_cond(ts_col))
+            src_rows = _src_row_count(src, table, _window_cond(ts_col, table))
         except Exception:
             pass
 

@@ -238,6 +238,7 @@ def at_run_validation():
     month_to        = data.get("month_to")
     day_from        = data.get("day_from")
     day_to          = data.get("day_to")
+    today_tables    = data.get("today_tables", [])  # tables with "include today" toggle ON
 
     with _process_lock:
         if _process is not None and _process.poll() is None:
@@ -266,6 +267,8 @@ def at_run_validation():
             cmd += ["--day-to", str(int(day_to))]
         if tables_filter:
             cmd += ["--tables", ",".join(tables_filter)]
+        if today_tables:
+            cmd += ["--today-tables", ",".join(today_tables)]
         _process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
