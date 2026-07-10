@@ -1298,7 +1298,7 @@ def _process_table(table: str, src_cache: dict,
     all_cols= entry.get("all_cols", [])
 
     # Filter out ignored columns, but ALWAYS preserve PK columns
-    ignored = _cfg.get("ignore_fields", {}).get(DATABASE, {}).get(table, [])
+    ignored = _cfg.get("ignore_fields", {}).get("full_sync", {}).get(DATABASE, {}).get(table, [])
     all_cols = [c for c in all_cols if c not in ignored or c in pk_cols]
 
     has_pk  = bool(pk_cols)

@@ -2908,7 +2908,7 @@
         const resp = await fetch('/api/config/ignore-fields', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ db: activeDatabase, table, column, ignore }),
+          body: JSON.stringify({ db: activeDatabase, table, column, ignore, mode: 'full_sync' }),
         });
         const result = await resp.json();
         if (resp.ok && result.success) {
@@ -3203,7 +3203,8 @@
           warning: `<span class="det-type-tag" style="background:#fff3cd;color:#856404">WARNING</span>`,
         };
         const ROW_CLS = { match: '', mismatch: 'mismatch-row', missing: 'missing-row', extra: 'extra-row', warning: '' };
-        const ignored = (atConfig.ignore_fields && atConfig.ignore_fields[activeDatabase] && atConfig.ignore_fields[activeDatabase][table]) || [];
+        const fsIgnores = (atConfig.ignore_fields && atConfig.ignore_fields.full_sync) || {};
+        const ignored = (fsIgnores[activeDatabase] && fsIgnores[activeDatabase][table]) || [];
         schemaDetailsHtml = `
       <div class="det-scroll-box" style="margin-top:8px;">
         <table class="det-sample-table">
@@ -5063,9 +5064,13 @@
       }
     });
 
+    let scColumnsTable = null;
+    let scColumnsRows = [];
+
     async function scLoadColumns(table) {
       const box = document.getElementById('sc-columns');
-      if (!table) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      if (!table) { box.style.display = 'none'; box.innerHTML = ''; scColumnsTable = null; scColumnsRows = []; return; }
+      scColumnsTable = table;
       box.style.display = 'flex';
       box.innerHTML = '<span style="font-size:11px;color:var(--muted)">loading…</span>';
       try {
@@ -5077,16 +5082,49 @@
         const data = await res.json();
         const rows = data.source?.rows || [];
         if (!rows.length) { box.innerHTML = '<span style="font-size:11px;color:var(--muted)">no columns found</span>'; return; }
-        box.innerHTML = rows.map(r => {
-          const c = r[0], isPk = r[3] === 'PRI';
-          const style = isPk
-            ? 'cursor:pointer;font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--purple);background:rgba(188,140,255,0.12);color:var(--purple);white-space:nowrap;font-weight:600'
-            : 'cursor:pointer;font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--blue);white-space:nowrap';
-          const badge = isPk ? ' <span style="font-size:9px;opacity:0.7">PK</span>' : '';
-          return `<span onclick="scInsertCol('${c.replace(/'/g,"\\'")}\')" title="${isPk ? 'Primary Key — ' : ''}คลิกเพื่อ insert" style="${style}">${c}${badge}</span>`;
-        }).join('');
+        scColumnsRows = rows;
+        scRenderColumns(rows);
       } catch (e) {
         box.innerHTML = `<span style="font-size:11px;color:var(--fail)">${e.message}</span>`;
+      }
+    }
+
+    function scRenderColumns(rows) {
+      const box = document.getElementById('sc-columns');
+      const table = scColumnsTable;
+      const scIgnores = (atConfig.ignore_fields && atConfig.ignore_fields.sql_compare) || {};
+      const ignored = (scIgnores[activeDatabase] && scIgnores[activeDatabase][table]) || [];
+      box.innerHTML = rows.map(r => {
+        const c = r[0], isPk = r[3] === 'PRI';
+        const isIgnored = !isPk && ignored.includes(c);
+        const style = isPk
+          ? 'cursor:pointer;font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--purple);background:rgba(188,140,255,0.12);color:var(--purple);white-space:nowrap;font-weight:600'
+          : `cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:${isIgnored ? 'var(--muted)' : 'var(--blue)'};white-space:nowrap;${isIgnored ? 'text-decoration:line-through;opacity:0.6' : ''}`;
+        const badge = isPk ? ' <span style="font-size:9px;opacity:0.7">PK</span>' : '';
+        const ignoreToggle = isPk ? '' :
+          ` <span onclick="event.stopPropagation(); scToggleIgnoreField('${c.replace(/'/g,"\\'")}\', ${!isIgnored})" title="${isIgnored ? 'unignore' : 'ignore in sql_compare'}" style="cursor:pointer;font-size:9px;opacity:0.7;margin-left:3px">${isIgnored ? '✓' : '⛔'}</span>`;
+        return `<span onclick="scInsertCol('${c.replace(/'/g,"\\'")}\')" title="${isPk ? 'Primary Key — ' : ''}คลิกเพื่อ insert" style="${style}">${c}${badge}${ignoreToggle}</span>`;
+      }).join('');
+    }
+
+    async function scToggleIgnoreField(column, ignore) {
+      const table = scColumnsTable;
+      if (!table) return;
+      try {
+        const resp = await fetch('/api/config/ignore-fields', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ db: activeDatabase, table, column, ignore, mode: 'sql_compare' }),
+        });
+        const result = await resp.json();
+        if (resp.ok && result.success) {
+          atConfig.ignore_fields = result.ignore_fields;
+          scRenderColumns(scColumnsRows);
+        } else {
+          alert('Failed to update ignore field settings: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert('Error: server unreachable');
       }
     }
 
