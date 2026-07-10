@@ -434,11 +434,31 @@ DEFAULT_CONFIG = {
 }
 
 
+def _migrate_ignore_fields(cfg):
+    """Legacy ignore_fields was flat: {db: {table: [cols]}}, shared by every
+    compare mode. Split it into per-mode buckets so toggling an ignore in the
+    full-sync audit drawer no longer silently changes sql_compare results.
+    Old entries are copied into both modes once; new toggles diverge from there."""
+    ig = cfg.get("ignore_fields")
+    if not isinstance(ig, dict) or not ig:
+        return False
+    if "sql_compare" in ig or "full_sync" in ig:
+        return False
+    cfg["ignore_fields"] = {
+        "sql_compare": json.loads(json.dumps(ig)),
+        "full_sync": ig,
+    }
+    return True
+
+
 def _load_config():
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
+            if _migrate_ignore_fields(cfg):
+                _save_config(cfg)
+            return cfg
         except Exception:
             pass
     return DEFAULT_CONFIG.copy()
@@ -716,13 +736,17 @@ def post_ignore_fields():
     table = data.get("table")
     column = data.get("column")
     ignore = data.get("ignore", False)
+    mode = data.get("mode", "full_sync")
 
     if not db or not table or not column:
         return jsonify({"error": "Missing db, table, or column parameter"}), 400
+    if mode not in ("full_sync", "sql_compare"):
+        return jsonify({"error": "mode must be 'full_sync' or 'sql_compare'"}), 400
 
     cfg = _load_config()
     ignore_fields = cfg.setdefault("ignore_fields", {})
-    db_ignores = ignore_fields.setdefault(db, {})
+    mode_ignores = ignore_fields.setdefault(mode, {})
+    db_ignores = mode_ignores.setdefault(db, {})
     table_ignores = db_ignores.setdefault(table, [])
 
     if ignore:
@@ -735,7 +759,9 @@ def post_ignore_fields():
     if not table_ignores:
         db_ignores.pop(table, None)
     if not db_ignores:
-        ignore_fields.pop(db, None)
+        mode_ignores.pop(db, None)
+    if not mode_ignores:
+        ignore_fields.pop(mode, None)
 
     if _save_config(cfg):
         return jsonify({"success": True, "ignore_fields": cfg.get("ignore_fields", {})})
@@ -904,7 +930,7 @@ def random_compare():
         common_cols = [c for c in all_cols if c in set(src_col_names)]
 
         # Exclude ignored columns, preserving primary keys
-        ignored = cfg.get("ignore_fields", {}).get(db, {}).get(table, [])
+        ignored = cfg.get("ignore_fields", {}).get("full_sync", {}).get(db, {}).get(table, [])
         common_cols = [c for c in common_cols if c not in ignored or c in pk_cols]
 
         if not common_cols:
@@ -2074,7 +2100,7 @@ def _sc_worker(sql: str, table: str, db: str):
         # Filter out ignored columns if a table is specified, but ALWAYS preserve PK columns
         if _type_table:
             cfg = _load_config()
-            ignored = cfg.get("ignore_fields", {}).get(db, {}).get(_type_table, [])
+            ignored = cfg.get("ignore_fields", {}).get("sql_compare", {}).get(db, {}).get(_type_table, [])
             common_cols = [c for c in common_cols if c not in ignored or c in pk_cols]
 
         if not common_cols:
