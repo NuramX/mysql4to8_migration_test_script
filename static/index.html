@@ -2632,6 +2632,8 @@
       activeDatabase = selector.value;
       atUpdateDBPlaceholderText(activeDatabase);
       atRestoreDbState(activeDatabase);
+      atSelected.clear();
+      atUpdateSelBar();
       atUpdatePills();
       atRenderTable();
       atLoadTableList();
