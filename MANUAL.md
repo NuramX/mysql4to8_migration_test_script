@@ -31,8 +31,8 @@
 
 1. ดาวน์โหลดโค้ดโปรเจกต์ลงเครื่อง:
    ```
-   git clone https://github.com/NuramX/mysql4to8_migration_test_script.git
-   cd mysql4to8_migration_test_script
+   git clone https://bitbucket.org/onlineasset-th/backoffice-efincheckcomparedata.git
+   cd backoffice-efincheckcomparedata
    ```
 2. สร้าง virtual environment (พื้นที่แยกสำหรับติดตั้งไลบรารีของโปรเจกต์นี้โดยเฉพาะ):
    ```

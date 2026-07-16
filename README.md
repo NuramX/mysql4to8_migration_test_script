@@ -19,8 +19,8 @@
 ## ติดตั้ง
 
 ```bash
-git clone https://github.com/NuramX/mysql4to8_migration_test_script.git
-cd mysql4to8_migration_test_script
+git clone https://bitbucket.org/onlineasset-th/backoffice-efincheckcomparedata.git
+cd backoffice-efincheckcomparedata
 
 # สร้าง virtual environment
 python3 -m venv .venv
