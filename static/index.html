@@ -1,0 +1,5290 @@
+<!DOCTYPE html>
+<html lang="th">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>prs — Migration Validator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
+  <style>
+    /* ─── Reset & Base ─────────────────────────────────────────────── */
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #21262d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #7d8590;
+      --pass: #3fb950;
+      --pass-bg: #1a3a22;
+      --fail: #f85149;
+      --fail-bg: #3a1a1a;
+      --warn: #e3b341;
+      --warn-bg: #3a2e10;
+      --skip: #7d8590;
+      --blue: #58a6ff;
+      --purple: #bc8cff;
+      --src-col: #58a6ff;
+      --tgt-col: #bc8cff;
+      --radius: 10px;
+      --radius-sm: 6px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    code,
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+    }
+
+    /* ─── Scrollbar ─────────────────────────────────────────────────── */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--surface);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    /* ─── Overview Bar (sticky top) ─────────────────────────────────── */
+    #overview {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+    }
+
+    .ov-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      padding: 14px 0 10px;
+      gap: 24px;
+      row-gap: 12px;
+    }
+
+    .ov-nav-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .ov-options-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 20px;
+      row-gap: 10px;
+      padding: 10px 0 14px;
+      border-top: 1px solid var(--border);
+    }
+
+    .ov-options-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .ov-options-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .ov-checkbox {
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    .ov-checkbox input {
+      cursor: pointer;
+    }
+
+    .ov-range-sep {
+      color: var(--muted);
+    }
+
+    .ov-run-btn {
+      margin-left: auto;
+    }
+
+    .ov-title {
+      font-size: 15px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .db-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
+      font-size: 11px;
+      font-weight: 500;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    .db-badge .badge-side {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 4px 10px;
+      line-height: 1.25;
+      gap: 1px;
+    }
+
+    .db-badge .badge-side.src {
+      background: rgba(88,166,255,0.10);
+      border-right: 1px solid var(--border);
+    }
+
+    .db-badge .badge-side.tgt {
+      background: rgba(188,140,255,0.10);
+    }
+
+    .db-badge .badge-arrow {
+      padding: 0 6px;
+      color: var(--muted);
+      font-size: 14px;
+      background: var(--surface2);
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+    }
+
+    .db-badge .badge-ver {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .db-badge .badge-host {
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      opacity: 0.7;
+      max-width: 110px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .db-badge .badge-side.src .badge-ver { color: var(--src-col); }
+    .db-badge .badge-side.tgt .badge-ver { color: var(--tgt-col); }
+
+    /* legacy selectors kept for existing JS references */
+    .db-badge .v4 { color: var(--src-col); font-weight: 700; }
+    .db-badge .v8 { color: var(--tgt-col); font-weight: 700; }
+
+    /* ─── Misc ───────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 12px 0;
+    }
+
+    .info-row {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+
+    .info-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .info-item-label {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .info-item-val {
+      font-size: 14px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Interactive search bar & filter tags */
+    .table-filter-bar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .search-input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      flex: 1;
+      min-width: 240px;
+      outline: none;
+      transition: border-color 0.2s;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .search-input:focus {
+      border-color: var(--blue);
+    }
+
+    .filter-btn-group {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+
+    .filter-btn {
+      background: var(--surface2);
+      border: none;
+      color: var(--muted);
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .filter-btn:hover {
+      color: var(--text);
+    }
+
+    .filter-btn.active {
+      background: var(--blue);
+      color: #fff;
+    }
+
+    /* ─── All Tables View ─────────────────────────────────────────────── */
+    #at-main {
+      padding: 0;
+    }
+
+    #at-run-btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #1a3a5c, #1f4e8c);
+      border: 1px solid #2d6bc7;
+      color: #fff;
+      font-weight: 600;
+      font-size: 13px;
+      padding: 8px 20px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+      font-family: 'Inter', sans-serif;
+    }
+
+    #at-run-btn:hover:not(:disabled) {
+      background: linear-gradient(135deg, #1f4e8c, #2d6bc7);
+      transform: translateY(-1px);
+    }
+
+    #at-run-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    #at-run-btn .spinner {
+      display: none;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    #at-run-btn.running .spinner {
+      display: block;
+    }
+
+    #at-run-btn.running .btn-icon {
+      display: none;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    #at-summary-bar {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      padding: 10px 0 12px;
+      font-size: 12px;
+      flex-wrap: wrap;
+      border-top: 1px solid var(--border);
+    }
+
+    .at-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .at-pill-count {
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .at-pill-count.pass {
+      color: var(--pass);
+    }
+
+    .at-pill-count.fail {
+      color: var(--fail);
+    }
+
+    .at-pill-count.warn {
+      color: var(--warn);
+    }
+
+    .at-pill-count.skip {
+      color: var(--muted);
+    }
+
+    #at-missing-badge {
+      margin-left: auto;
+      background: var(--warn-bg);
+      color: var(--warn);
+      border: 1px solid rgba(227, 179, 65, 0.3);
+      border-radius: 20px;
+      padding: 2px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      display: none;
+    }
+
+    #at-filter-bar {
+      display: flex;
+      gap: 8px;
+      padding: 10px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      align-items: center;
+      flex-wrap: wrap;
+      position: sticky;
+      top: var(--overview-h, 0px);
+      z-index: 99;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    #at-quick-btn {
+      display: none;
+      margin-left: auto;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #1a3a2a, #2d6b45);
+      border: 1px solid #4dcc8a;
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 6px 16px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    #at-quick-btn:hover:not(:disabled) {
+      background: linear-gradient(135deg, #2d6b45, #4dcc8a);
+      transform: translateY(-1px);
+    }
+    #at-quick-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    #at-quick-btn .spinner {
+      display: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    #at-quick-btn.running .spinner { display: inline-block; }
+    #at-quick-btn.running .quick-btn-icon { display: none; }
+
+    #at-sync-btn {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #3a1a5c, #5a2d91);
+      border: 1px solid #7c4dcc;
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 6px 16px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    #at-sync-btn:hover:not(:disabled) {
+      background: linear-gradient(135deg, #5a2d91, #7c4dcc);
+      transform: translateY(-1px);
+    }
+
+    #at-sync-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    #at-sync-btn .spinner {
+      display: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    #at-sync-btn.running .spinner {
+      display: inline-block;
+    }
+
+    #at-sync-btn.running .sync-btn-icon {
+      display: none;
+    }
+
+    .at-sel-bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .at-sel-link {
+      color: var(--blue);
+      cursor: pointer;
+      text-decoration: underline;
+      background: none;
+      border: none;
+      font-size: 11px;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .at-filter-btn {
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.15s;
+    }
+
+    .at-filter-btn.active {
+      background: var(--surface2);
+      color: var(--text);
+      border-color: var(--blue);
+    }
+
+    .at-filter-btn:hover:not(.active) {
+      border-color: var(--muted);
+      color: var(--text);
+    }
+
+    #at-table-wrap {
+      overflow-x: auto;
+    }
+
+    #at-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    #at-table th {
+      padding: 8px 12px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+
+    #at-table td {
+      padding: 7px 12px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      vertical-align: middle;
+    }
+
+    .at-row:hover td {
+      background: rgba(88, 166, 255, 0.04);
+    }
+
+    .at-row.pass-row .at-tname {
+      color: var(--text);
+    }
+
+    .at-row.fail-row .at-tname {
+      color: var(--fail);
+    }
+
+    .at-row.warn-row .at-tname {
+      color: var(--warn);
+    }
+
+    .at-tname {
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+    }
+
+    .at-rows {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .at-check-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .at-check-badge.pass {
+      background: var(--pass-bg);
+      color: var(--pass);
+    }
+
+    .at-check-badge.fail {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .at-check-badge.warn {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .at-check-badge.skip {
+      background: var(--surface2);
+      color: var(--muted);
+    }
+
+    .at-detail-cell {
+      max-width: 300px;
+    }
+
+    .at-detail-cell code {
+      font-size: 10px;
+      color: var(--muted);
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .at-today-cell {
+      text-align: center;
+    }
+
+    .at-today-switch {
+      position: relative;
+      display: inline-block;
+      width: 32px;
+      height: 18px;
+      vertical-align: middle;
+      cursor: pointer;
+    }
+
+    .at-today-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .at-today-switch .at-today-slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      transition: 0.15s;
+      border-radius: 999px;
+    }
+
+    .at-today-switch .at-today-slider::before {
+      content: "";
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 2px;
+      top: 2px;
+      background: var(--text);
+      transition: 0.15s;
+      border-radius: 50%;
+    }
+
+    .at-today-switch input:checked+.at-today-slider {
+      background: var(--blue);
+    }
+
+    .at-today-switch input:checked+.at-today-slider::before {
+      transform: translateX(14px);
+    }
+
+    #at-placeholder {
+      text-align: center;
+      padding: 60px 24px;
+      color: var(--muted);
+    }
+
+    #at-placeholder .ph-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    #at-missing-list {
+      margin: 12px 24px;
+      padding: 10px 14px;
+      background: var(--warn-bg);
+      border: 1px solid rgba(227, 179, 65, 0.3);
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      color: var(--warn);
+      display: none;
+    }
+
+    /* ─── Premium Side Drawer (Slide-over) ───────────────────────────── */
+    .at-row {
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .at-row:hover td {
+      background: rgba(88, 166, 255, 0.06) !important;
+    }
+
+    .drawer-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(13, 17, 23, 0.7);
+      backdrop-filter: blur(8px);
+      z-index: 1000;
+      display: none;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .drawer-overlay.active {
+      display: block;
+      opacity: 1;
+    }
+
+    .drawer-content {
+      position: fixed;
+      top: 0;
+      right: -1200px;
+      bottom: 0;
+      width: 1100px;
+      max-width: 95%;
+      background: #0d1117;
+      border-left: 1px solid var(--border);
+      box-shadow: -10px 0 40px rgba(0, 0, 0, 0.6);
+      z-index: 1001;
+      display: flex;
+      flex-direction: column;
+      transition: right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      color: var(--text);
+      overscroll-behavior: contain;
+    }
+
+    .drawer-content.active {
+      right: 0;
+    }
+
+    .drawer-header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+    }
+
+    .drawer-title {
+      font-size: 16px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .drawer-close-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 28px;
+      cursor: pointer;
+      transition: color 0.15s, background-color 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+    }
+
+    .drawer-close-btn:hover {
+      color: var(--text);
+      background: var(--surface2);
+    }
+
+    .drawer-body {
+      padding: 24px;
+      overflow-y: auto;
+      flex: 1;
+      overscroll-behavior: contain;
+    }
+
+    .det-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+
+    @media (min-width: 750px) {
+      .det-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .det-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+
+    .det-card.full-width-card {
+      grid-column: span 1;
+    }
+
+    @media (min-width: 750px) {
+      .det-card.full-width-card {
+        grid-column: span 2;
+      }
+    }
+
+    .det-card-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 16px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      padding-bottom: 8px;
+    }
+
+    .det-status-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .det-status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .det-status-badge.pass {
+      background: var(--pass-bg);
+      color: var(--pass);
+    }
+
+    .det-status-badge.fail {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .det-status-badge.warn {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .det-status-badge.skip {
+      background: var(--surface2);
+      color: var(--muted);
+    }
+
+    .det-status-badge.enforced {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--blue);
+    }
+
+    .det-status-badge.sm {
+      font-size: 9px;
+      padding: 2px 6px;
+    }
+
+    .det-status-info {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .det-label {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .det-desc {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .det-sub-sec {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .det-summary-text {
+      font-size: 12px;
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+
+    .det-list {
+      background: var(--surface2);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      max-height: 150px;
+      overflow-y: auto;
+      border: 1px solid rgba(48, 54, 61, 0.5);
+    }
+
+    .det-item {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      margin-bottom: 6px;
+    }
+
+    .det-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .det-empty {
+      font-size: 11px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .fail-text {
+      color: var(--fail) !important;
+    }
+
+    .warn-text {
+      color: var(--warn) !important;
+    }
+
+    .pass-text {
+      color: var(--pass) !important;
+    }
+
+    .det-scroll-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      max-height: 250px;
+      overflow-y: auto;
+    }
+
+    .det-sample-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      text-align: left;
+    }
+
+    .det-sample-table th {
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.3);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .det-sample-table td {
+      padding: 6px 12px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+      vertical-align: middle;
+    }
+
+    .ignored-row {
+      opacity: 0.45;
+      background: rgba(255, 255, 255, 0.015) !important;
+    }
+    .ignored-row td strong {
+      color: var(--muted) !important;
+      text-decoration: line-through;
+      opacity: 0.8;
+    }
+
+    .det-type-tag {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 700;
+      white-space: nowrap;
+      text-align: center;
+      min-width: 65px;
+      letter-spacing: 0.03em;
+    }
+
+    .det-type-tag.mismatch {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .det-type-tag.missing {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .det-type-tag.extra {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--blue);
+    }
+
+    .mismatch-row {
+      background: rgba(248, 81, 73, 0.02);
+    }
+
+    .missing-row {
+      background: rgba(227, 179, 65, 0.02);
+    }
+
+    .extra-row {
+      background: rgba(88, 166, 255, 0.02);
+    }
+
+    .det-status-badge.pass {
+      background: var(--pass-bg);
+      color: var(--pass);
+    }
+
+    .det-status-badge.fail {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .det-status-badge.warn {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .det-status-badge.skip {
+      background: var(--surface2);
+      color: var(--muted);
+    }
+
+    .det-status-badge.enforced {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--blue);
+    }
+
+    .det-status-badge.sm {
+      font-size: 9px;
+      padding: 2px 6px;
+    }
+
+    .det-status-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .det-label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .det-desc {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .det-sub-sec {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .det-summary-text {
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .det-list {
+      background: var(--surface2);
+      border-radius: var(--radius-sm);
+      padding: 8px 12px;
+      max-height: 120px;
+      overflow-y: auto;
+      border: 1px solid rgba(48, 54, 61, 0.5);
+    }
+
+    .det-item {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      margin-bottom: 4px;
+    }
+
+    .det-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .det-empty {
+      font-size: 11px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .fail-text {
+      color: var(--fail) !important;
+    }
+
+    .warn-text {
+      color: var(--warn) !important;
+    }
+
+    .pass-text {
+      color: var(--pass) !important;
+    }
+
+    .det-scroll-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      max-height: 180px;
+      overflow-y: auto;
+    }
+
+    .det-sample-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      text-align: left;
+    }
+
+    .det-sample-table th {
+      padding: 6px 12px;
+      background: rgba(0, 0, 0, 0.2);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .det-sample-table td {
+      padding: 5px 12px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+      vertical-align: middle;
+      word-break: break-word;
+    }
+
+    .det-sample-table td code {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .det-type-tag {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 700;
+      white-space: nowrap;
+      text-align: center;
+      min-width: 65px;
+      letter-spacing: 0.03em;
+    }
+
+    .det-type-tag.mismatch {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .det-type-tag.missing {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .det-type-tag.extra {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--blue);
+    }
+
+    .mismatch-row {
+      background: rgba(248, 81, 73, 0.02);
+    }
+
+    .missing-row {
+      background: rgba(227, 179, 65, 0.02);
+    }
+
+    .extra-row {
+      background: rgba(88, 166, 255, 0.02);
+    }
+
+    /* ─── Metric Stats Grid ────────────────────────────────────────────── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 10px;
+      margin-bottom: 12px;
+    }
+
+    @media (min-width: 600px) {
+      .stats-grid {
+        grid-template-columns: repeat(6, 1fr);
+      }
+    }
+
+    .stat-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 6px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    .stat-card.src {
+      border-left: 3px solid var(--src-col);
+    }
+
+    .stat-card.tgt {
+      border-left: 3px solid var(--tgt-col);
+    }
+
+    .stat-card.match {
+      border-left: 3px solid var(--pass);
+    }
+
+    .stat-card.mismatch {
+      border-left: 3px solid var(--fail);
+    }
+
+    .stat-card.missing {
+      border-left: 3px solid var(--warn);
+    }
+
+    .stat-card.extra {
+      border-left: 3px solid var(--blue);
+    }
+
+    .stat-label {
+      font-size: 8px;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .stat-val {
+      font-size: 13px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text);
+    }
+
+    .stat-progress-bar {
+      font-size: 11px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      margin-bottom: 12px;
+      display: inline-block;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ─── Settings Panel Styles ────────────────────────────────────────── */
+    .db-select {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      font-family: 'JetBrains Mono', monospace;
+      transition: all 0.2s;
+      margin-left: 4px;
+    }
+
+    .db-select:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+    }
+
+    .settings-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-weight: 600;
+      font-size: 12px;
+      padding: 8px 14px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .settings-btn:hover {
+      background: var(--border);
+      border-color: var(--muted);
+    }
+
+    .settings-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .form-group label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .form-group input {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+      transition: all 0.2s;
+    }
+
+    .form-group input:focus {
+      border-color: var(--blue);
+      background: var(--surface);
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 80px 1fr;
+      gap: 12px;
+    }
+
+    .cfg-save-btn {
+      background: linear-gradient(135deg, #1f4e8c, #2d6bc7);
+      border: 1px solid #388bfd;
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 10px 20px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .cfg-save-btn:hover {
+      background: linear-gradient(135deg, #2d6bc7, #58a6ff);
+    }
+
+    .cfg-save-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .save-spinner {
+      display: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .cfg-save-btn.saving .save-spinner {
+      display: block;
+    }
+
+    /* ─── Random Compare Panel ─────────────────────────────────────────── */
+    .rc-panel {
+      margin-top: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .rc-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      background: linear-gradient(135deg, rgba(188, 140, 255, 0.08), rgba(88, 166, 255, 0.06));
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .rc-panel-title {
+      font-size: 14px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+    }
+
+    .rc-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .rc-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: linear-gradient(135deg, #2a1a4e, #3d2272);
+      border: 1px solid #7c4dcc;
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 8px 18px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .rc-btn:hover:not(:disabled) {
+      background: linear-gradient(135deg, #3d2272, #5a35a0);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(124, 77, 204, 0.3);
+    }
+
+    .rc-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .rc-btn .rc-spinner {
+      display: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .rc-btn.loading .rc-spinner {
+      display: inline-block;
+    }
+
+    .rc-btn.loading .rc-btn-icon {
+      display: none;
+    }
+
+    .rc-batch-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .rc-batch-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 5px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.15s;
+    }
+
+    .rc-batch-btn:hover:not(:disabled) {
+      background: var(--border);
+      color: #fff;
+    }
+
+    .rc-batch-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    .rc-summary-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 20px;
+      background: rgba(0, 0, 0, 0.15);
+      border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+
+    .rc-stat {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .rc-stat-val {
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+    }
+
+    .rc-stat-val.pass {
+      color: var(--pass);
+    }
+
+    .rc-stat-val.fail {
+      color: var(--fail);
+    }
+
+    .rc-stat-val.warn {
+      color: var(--warn);
+    }
+
+    .rc-stat-val.purple {
+      color: var(--purple);
+    }
+
+    .rc-stat-val.total {
+      color: var(--blue);
+    }
+
+    .rc-filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+    }
+
+    .rc-filter-btn {
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.15s;
+    }
+
+    .rc-filter-btn.active {
+      background: var(--surface2);
+      color: var(--text);
+      border-color: var(--blue);
+    }
+
+    .rc-filter-btn:hover:not(.active) {
+      border-color: var(--muted);
+      color: var(--text);
+    }
+
+    .rc-body {
+      padding: 0;
+      max-height: 600px;
+      overflow-y: auto;
+    }
+
+    .rc-row-card {
+      border-bottom: 1px solid var(--border);
+      transition: background 0.15s;
+    }
+
+    .rc-row-card:last-child {
+      border-bottom: none;
+    }
+
+    .rc-row-card.mismatch {
+      background: rgba(248, 81, 73, 0.03);
+    }
+
+    .rc-row-card.missing {
+      background: rgba(227, 179, 65, 0.03);
+    }
+
+    .rc-row-card.extra {
+      background: rgba(188, 140, 255, 0.03);
+    }
+
+    .rc-row-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 20px;
+      cursor: pointer;
+      transition: background 0.15s;
+      min-height: 42px;
+    }
+
+    .rc-row-header:hover {
+      background: rgba(88, 166, 255, 0.04);
+    }
+
+    .rc-row-num {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--muted);
+      min-width: 32px;
+      text-align: right;
+    }
+
+    .rc-row-pk {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--blue);
+      font-weight: 600;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rc-row-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3px 10px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .rc-row-badge.match {
+      background: var(--pass-bg);
+      color: var(--pass);
+    }
+
+    .rc-row-badge.mismatch {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .rc-row-badge.missing {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .rc-row-badge.extra {
+      background: rgba(188, 140, 255, 0.15);
+      color: var(--purple);
+    }
+
+    .rc-row-expand {
+      color: var(--muted);
+      font-size: 11px;
+      transition: transform 0.2s;
+    }
+
+    .rc-row-expand.open {
+      transform: rotate(90deg);
+    }
+
+    .rc-fields-container {
+      display: none;
+      padding: 0 20px 14px 62px;
+    }
+
+    .rc-fields-container.open {
+      display: block;
+    }
+
+    .rc-fields-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .rc-fields-table th {
+      padding: 8px 14px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: rgba(0, 0, 0, 0.2);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .rc-fields-table td {
+      padding: 9px 14px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+      vertical-align: middle;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .rc-fields-table tr.field-diff td {
+      background: rgba(248, 81, 73, 0.06);
+    }
+
+    .rc-fields-table .field-col-name {
+      font-weight: 600;
+      color: var(--text);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .rc-fields-table .field-src {
+      color: var(--src-col);
+      word-break: break-all;
+    }
+
+    .rc-fields-table .field-tgt {
+      color: var(--tgt-col);
+      word-break: break-all;
+    }
+
+    .rc-fields-table .field-match-icon {
+      text-align: center;
+      font-size: 14px;
+      width: 40px;
+    }
+
+    .rc-fields-table .field-match-icon.ok {
+      color: var(--pass);
+    }
+
+    .rc-fields-table .field-match-icon.diff {
+      color: var(--fail);
+      font-weight: 700;
+    }
+
+    .rc-pagination {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 12px 20px;
+      background: rgba(0, 0, 0, 0.1);
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+    }
+
+    .rc-page-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.15s;
+    }
+
+    .rc-page-btn:hover:not(:disabled) {
+      background: var(--border);
+    }
+
+    .rc-page-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    .rc-page-info {
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .rc-empty {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .rc-empty-icon {
+      font-size: 36px;
+      margin-bottom: 10px;
+    }
+
+    /* ─── SQL Runner ─────────────────────────────── */
+    .sql-runner-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-secondary);
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+
+    .sql-runner-btn:hover {
+      background: #2d333b;
+      border-color: var(--blue);
+    }
+
+    .sql-table-btn {
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-size: 10px;
+      cursor: pointer;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      transition: all 0.1s;
+    }
+
+    .sql-table-btn:hover {
+      background: var(--blue);
+      color: #fff;
+      border-color: var(--blue);
+    }
+
+    .sql-toolbar {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sql-controls-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .sql-select {
+      padding: 5px 8px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: var(--bg-secondary);
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+      color-scheme: dark;
+    }
+
+    .sql-select option {
+      background: var(--bg-secondary, #161b22);
+      color: var(--text);
+    }
+
+    .sql-combo-list {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      max-height: 260px;
+      overflow-y: auto;
+      background: var(--bg-secondary, #161b22);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      z-index: 50;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+    }
+
+    .sql-combo-list.active { display: block; }
+
+    .sql-combo-item {
+      padding: 6px 10px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .sql-combo-item:hover,
+    .sql-combo-item.active {
+      background: var(--surface2);
+    }
+
+    .sql-combo-empty {
+      padding: 6px 10px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .sql-textarea {
+      width: 100%;
+      min-height: 110px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      background: #0d1117;
+      color: #e6edf3;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      resize: vertical;
+      box-sizing: border-box;
+      line-height: 1.5;
+      outline: none;
+    }
+
+    .sql-textarea:focus {
+      border-color: var(--blue);
+    }
+
+    .sql-run-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 16px;
+      border-radius: 6px;
+      border: none;
+      background: var(--blue);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .sql-run-btn:hover {
+      opacity: 0.85;
+    }
+
+    .sql-run-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .sql-results {
+      margin-top: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .sql-result-block {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .sql-result-header {
+      padding: 7px 12px;
+      background: var(--bg-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .sql-scroll {
+      overflow-x: auto;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+
+    .sql-tbl {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .sql-tbl th {
+      padding: 5px 10px;
+      background: #1c2128;
+      color: var(--muted);
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      white-space: nowrap;
+    }
+
+    .sql-tbl td {
+      padding: 4px 10px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      white-space: nowrap;
+    }
+
+    .sql-tbl tr:hover td {
+      background: rgba(48, 54, 61, 0.4);
+    }
+
+    .sql-null {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .sql-error-box {
+      padding: 12px 16px;
+      color: var(--fail);
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      background: rgba(218, 54, 51, 0.08);
+      border-radius: 4px;
+      margin: 4px 0;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- ─── Overview Bar ───────────────────────────────────────────────── -->
+  <div id="overview">
+    <div class="ov-top">
+      <div class="ov-title">
+        <div style="display:flex; align-items:center; gap:4px;">
+          <span style="font-size:15px">🗄️</span>
+          <select id="db-selector" onchange="onDatabaseChange()" class="db-select">
+            <option value="prs">prs</option>
+          </select>
+        </div>
+        <div class="db-badge" title="Source → Target comparison mode">
+          <div class="badge-side src">
+            <span class="badge-ver v4" id="badge-src-ver">MySQL 4</span>
+            <span class="badge-host" id="badge-src-host">source</span>
+          </div>
+          <div class="badge-arrow">→</div>
+          <div class="badge-side tgt">
+            <span class="badge-ver v8" id="badge-tgt-ver">MySQL 8</span>
+            <span class="badge-host" id="badge-tgt-host">target</span>
+          </div>
+        </div>
+        <span style="font-size:12px;color:var(--muted);font-weight:400" id="at-run-time"></span>
+      </div>
+      <div class="ov-nav-group">
+        <button class="sql-runner-btn" onclick="sqlOpen(null)">
+          <span>🔍 SQL Runner</span>
+        </button>
+        <button class="sql-runner-btn" onclick="scOpen()" style="border-color:var(--pass);color:var(--pass)">
+          <span>⚖ SQL Compare</span>
+        </button>
+        <button id="at-settings-btn" onclick="atOpenSettingsDrawer()" class="settings-btn">
+          <span>⚙️ Connections</span>
+        </button>
+      </div>
+    </div>
+    <div class="ov-options-row">
+      <div class="ov-options-group">
+        <span class="ov-options-label">Validation options:</span>
+        <label class="ov-checkbox">
+          <input type="checkbox" id="at-skip-sync" checked>
+          Skip Full Sync (fast mode)
+        </label>
+        <label class="ov-checkbox">
+          <input type="checkbox" id="at-auto-sample">
+          Auto Random Sample
+        </label>
+      </div>
+      <div class="ov-options-group">
+        <span class="ov-options-label" title="ตรวจเฉพาะข้อมูลช่วงปี/เดือนนี้ (ตาม column วันที่ใน PK) — Default = ค่าจาก config">Data Range:</span>
+        <select id="at-year-from" class="db-select" onchange="atOnYearChange('from',this.value)"></select>
+        <select id="at-month-from" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('from',this.value)"></select>
+        <select id="at-day-from" class="db-select" disabled style="opacity:0.4"></select>
+        <span class="ov-range-sep">–</span>
+        <select id="at-year-to" class="db-select" onchange="atOnYearChange('to',this.value)"></select>
+        <select id="at-month-to" class="db-select" disabled style="opacity:0.4" onchange="atOnMonthChange('to',this.value)"></select>
+        <select id="at-day-to" class="db-select" disabled style="opacity:0.4"></select>
+      </div>
+      <button id="at-run-btn" onclick="runAllTables()" class="ov-run-btn">
+        <div class="spinner"></div>
+        <span class="btn-icon">▶</span>
+        <span id="at-btn-text">Run Validation</span>
+      </button>
+    </div>
+    <div id="at-summary-bar">
+      <div class="at-pill"><span class="at-pill-count pass" id="at-pill-pass">0</span><span
+          style="color:var(--muted)">Tables Pass</span></div>
+      <div class="at-pill"><span class="at-pill-count fail" id="at-pill-fail">0</span><span
+          style="color:var(--muted)">Tables Fail</span></div>
+      <div class="at-pill"><span class="at-pill-count warn" id="at-pill-warn">0</span><span
+          style="color:var(--muted)">Warnings</span></div>
+      <div class="at-pill"><span class="at-pill-count skip" id="at-pill-skip">0</span><span
+          style="color:var(--muted)">Skipped</span></div>
+      <div style="margin-left:auto;font-size:12px;color:var(--muted)" id="at-progress-text"></div>
+      <div id="at-missing-badge">⚠ Tables missing in target: <span id="at-missing-count">0</span></div>
+    </div>
+  </div>
+
+  <!-- ─── Main Content: All Tables ────────────────────────────────── -->
+  <div id="at-main">
+    <div id="at-missing-list"></div>
+
+    <div id="at-filter-bar">
+      <button class="at-filter-btn active" onclick="atSetFilter('all')">ALL</button>
+      <button class="at-filter-btn" onclick="atSetFilter('fail')">FAIL</button>
+      <button class="at-filter-btn" onclick="atSetFilter('warn')">WARN</button>
+      <button class="at-filter-btn" onclick="atSetFilter('pass')">PASS</button>
+      <div class="at-sel-bar" id="at-sel-bar" style="display:none">
+        <span id="at-sel-count" style="color:var(--blue);font-weight:600">0 selected</span>
+        <button class="at-sel-link" onclick="atSelectAll()">Select All Visible</button>
+        <button class="at-sel-link" onclick="atSelectNone()">Deselect All</button>
+      </div>
+      <button id="at-quick-btn" onclick="runQuickSelected()">
+        <div class="spinner"></div>
+        <span class="quick-btn-icon">🔍</span>
+        <span id="at-quick-btn-text">Quick Scan Selected (0)</span>
+      </button>
+      <button id="at-sync-btn" onclick="runSyncSelected()">
+        <div class="spinner"></div>
+        <span class="sync-btn-icon">⚡</span>
+        <span id="at-sync-btn-text">Run Full Sync on Selected (0)</span>
+      </button>
+    </div>
+
+    <div id="at-placeholder">
+      <div class="ph-icon">🗂️</div>
+      <h2>Ready to Validate All Tables</h2>
+      <p>กดปุ่ม <strong>Run Validation</strong> เพื่อตรวจสอบทุก table ใน database <strong
+          id="at-placeholder-db-span">prs</strong></p>
+      <p style="margin-top:8px;font-size:12px">ตรวจ Row Count, Schema, Indexes, Duplicate PK ทุกตาราง</p>
+    </div>
+
+    <div id="at-table-wrap" style="display:none">
+      <table id="at-table">
+        <thead>
+          <tr>
+            <th style="width:32px"><input type="checkbox" id="at-chk-all" onchange="atToggleAll(this.checked)"
+                title="Select all visible"></th>
+            <th>Table Name</th>
+            <th>Source Rows</th>
+            <th>Target Rows</th>
+            <th title="ตรวจสอบจำนวนแถว: เทียบจำนวนแถวระหว่าง Source และ Target ว่ามีรายการตกหล่นหรือไม่"
+              style="text-align:center">Row Count Check</th>
+            <th
+              title="ตรวจสอบโครงสร้างคอลัมน์: เช็คความเข้ากันได้ของฟิลด์ ขนาด และชนิดข้อมูลว่าปลายทางรองรับอย่างถูกต้องหรือไม่"
+              style="text-align:center">Schema Check</th>
+            <th title="ตรวจสอบดัชนีและคีย์หลัก: ตรวจสอบความครบถ้วนของ Index และ Primary Key ทั้งหมดของตาราง"
+              style="text-align:center">Index Check</th>
+            <th
+              title="ตรวจสอบคีย์หลักซ้ำซ้อน: เช็คความไม่ซ้ำกัน (Uniqueness) ของฟิลด์ Primary Key เพื่อความสมบูรณ์ของความสัมพันธ์ข้อมูล"
+              style="text-align:center">Duplicate PK Check</th>
+            <th
+              title="เปรียบเทียบข้อมูลแถวต่อแถว: รันสแกนตรวจสอบข้อมูลเชิงลึกเปรียบเทียบค่าทุกฟิลด์ในทุกแถวแบบ 100% ว่าตรงกันจริง"
+              style="text-align:center">Full Sync Check</th>
+            <th>Error Summary</th>
+            <th title="เปิด: ตรวจข้อมูลได้ถึงวันนี้ (รวมวันนี้) / ปิด (ค่าเริ่มต้น): ตรวจถึงสิ้นวันเมื่อวาน"
+              style="text-align:center">Include Today</th>
+          </tr>
+        </thead>
+        <tbody id="at-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Drawer Overlay & Side Panel (Separate Page View) -->
+  <div class="drawer-overlay" id="at-drawer-overlay" onclick="atCloseDrawer()"></div>
+  <div class="drawer-content" id="at-drawer-content">
+    <div class="drawer-header">
+      <div class="drawer-title" id="at-drawer-title">🔍 table_name — Migration Audit Report</div>
+      <button class="drawer-close-btn" onclick="atCloseDrawer()">&times;</button>
+    </div>
+    <div class="drawer-body" id="at-drawer-body">
+      <!-- Render details card grid here -->
+    </div>
+  </div>
+
+  <!-- Settings Overlay & Side Panel (Connection Settings) -->
+  <div class="drawer-overlay" id="at-settings-overlay" onclick="atCloseSettingsDrawer()"></div>
+  <div class="drawer-content" id="at-settings-content" style="width: 480px;">
+    <div class="drawer-header">
+      <div class="drawer-title">⚙️ Connection Settings</div>
+      <button class="drawer-close-btn" onclick="atCloseSettingsDrawer()">&times;</button>
+    </div>
+    <div class="drawer-body">
+      <div class="settings-form">
+        <h3
+          style="margin-bottom: 12px; color: var(--blue); font-size: 13px; border-bottom: 1px solid var(--border); padding-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">
+          📂 Source Database</h3>
+        <div class="form-group">
+          <label>Host IP</label>
+          <input type="text" id="cfg-src-host" placeholder="10.0.0.1">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Port</label>
+            <input type="number" id="cfg-src-port" placeholder="3306" value="3306">
+          </div>
+          <div class="form-group">
+            <label>Username</label>
+            <input type="text" id="cfg-src-user" placeholder="username">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="cfg-src-pass" placeholder="••••••••">
+        </div>
+
+        <h3
+          style="margin-top: 24px; margin-bottom: 12px; color: var(--purple); font-size: 13px; border-bottom: 1px solid var(--border); padding-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">
+          📂 Target Databases</h3>
+
+        <div id="cfg-tgt-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:10px;"></div>
+
+        <button type="button" id="cfg-tgt-add-btn" onclick="atShowTargetForm()"
+          style="width:100%; padding:6px; font-size:12px; border-radius:4px; border:1px dashed var(--border); background:transparent; color:var(--muted); cursor:pointer;">
+          + Add Target
+        </button>
+
+        <div id="cfg-tgt-form" style="display:none; margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:6px;">
+          <input type="hidden" id="cfg-tgt-edit-name" value="">
+          <div class="form-group">
+            <label>Target Name</label>
+            <input type="text" id="cfg-tgt-name" placeholder="e.g. prod_mysql8">
+          </div>
+          <div class="form-group">
+            <label>Host IP</label>
+            <input type="text" id="cfg-tgt-host" placeholder="10.0.0.2">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Port</label>
+              <input type="number" id="cfg-tgt-port" placeholder="3306" value="3306">
+            </div>
+            <div class="form-group">
+              <label>Username</label>
+              <input type="text" id="cfg-tgt-user" placeholder="username">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="cfg-tgt-pass" placeholder="••••••••">
+            </div>
+            <div class="form-group">
+              <label>MySQL version</label>
+              <select id="cfg-tgt-version" class="sql-select" style="width: 100%; height: 32px; font-size: 12px; border-radius: 4px; padding: 0 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text);">
+                <option value="8">MySQL 8</option>
+                <option value="4">MySQL 4</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <button type="button" id="cfg-tgt-save-btn" class="cfg-save-btn" style="flex:1" onclick="atSaveTarget()">
+              <span class="save-spinner"></span> Test & Save Target
+            </button>
+            <button type="button" onclick="atHideTargetForm()"
+              style="padding:0 14px; border-radius:4px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer;">
+              Cancel
+            </button>
+          </div>
+          <div id="cfg-tgt-status-msg" style="font-size: 11px; text-align: center; margin-top: 6px; font-weight: 500;"></div>
+        </div>
+
+        <div class="drawer-title" style="margin-top:20px; font-size:13px;">🔢 Numeric Comparison</div>
+        <div class="form-group">
+          <label>Decimal rounding (places)</label>
+          <input type="number" id="cfg-decimal-round" min="0" max="10" placeholder="off — ใช้ tolerance แทน">
+          <div style="font-size:11px; color:var(--muted); margin-top:4px">
+            ปัดทศนิยมทั้งสองฝั่งเป็น N ตำแหน่งก่อนเทียบ เช่น 2 → 1.231 = 1.234 (ทั้งคู่ปัดเป็น 1.23)
+            เว้นว่าง = ปิด ใช้ tolerance ด้านล่าง
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Tolerance (abs diff)</label>
+          <input type="text" id="cfg-decimal-tol" placeholder="0.0001">
+          <div style="font-size:11px; color:var(--muted); margin-top:4px">
+            ต่างกันไม่เกินค่านี้ถือว่า match — ใช้เมื่อไม่ได้ตั้งปัดทศนิยม
+          </div>
+        </div>
+
+        <div style="margin-top: 24px; display: flex; flex-direction: column; gap: 8px;">
+          <button id="cfg-save-btn" class="cfg-save-btn" onclick="atSaveConfig()">
+            <span class="save-spinner"></span> Test & Save Connection Settings
+          </button>
+          <div id="cfg-status-msg" style="font-size: 11px; text-align: center; margin-top: 4px; font-weight: 500;">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SQL Runner Drawer -->
+  <div class="drawer-overlay" id="sql-overlay" onclick="sqlClose()"></div>
+  <div class="drawer-content" id="sql-drawer" style="width:780px">
+    <div class="drawer-header">
+      <div class="drawer-title" id="sql-drawer-title">🔍 SQL Runner</div>
+      <button class="drawer-close-btn" onclick="sqlClose()">&times;</button>
+    </div>
+    <div class="drawer-body" style="padding:0">
+      <div class="sql-toolbar">
+        <div class="sql-controls-row">
+          <label style="font-size:12px; color:var(--muted); white-space:nowrap">Run on:</label>
+          <select id="sql-target" class="sql-select">
+            <option value="source">Source only</option>
+            <option value="target">Target only (MySQL 8)</option>
+            <option value="both" selected>Both (compare)</option>
+          </select>
+          <label style="font-size:12px; color:var(--muted); white-space:nowrap; margin-left:8px">Limit:</label>
+          <select id="sql-limit" class="sql-select">
+            <option value="100">100 rows</option>
+            <option value="500" selected>500 rows</option>
+            <option value="1000">1000 rows</option>
+            <option value="2000">2000 rows</option>
+          </select>
+          <span style="margin-left:auto; font-size:11px; color:var(--muted)" id="sql-hint">SELECT only — no writes
+            allowed</span>
+        </div>
+        <textarea id="sql-input" class="sql-textarea" placeholder="SELECT * FROM `table_name` LIMIT 100"
+          spellcheck="false"></textarea>
+        <div style="font-size:11px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 10px;line-height:1.6">
+          ✓ <strong>ใช้ได้:</strong> SELECT / SHOW / DESCRIBE / EXPLAIN เท่านั้น — รวม GROUP BY, JOIN, subquery, aggregate function ได้ปกติ เพราะรันตรงๆ ไม่มีการแก้ query เพิ่ม (ไม่มี LIMIT ก็เติมให้อัตโนมัติ)<br>
+          ✗ <strong>ใช้ไม่ได้:</strong> INSERT/UPDATE/DELETE/DROP หรือคำสั่งเขียนข้อมูลใดๆ — ระบบ block ตั้งแต่ระดับ whitelist เพราะเครื่องมือนี้อ่านอย่างเดียว
+        </div>
+        <div style="display:flex; align-items:center; gap:10px">
+          <button class="sql-run-btn" id="sql-run-btn" onclick="sqlRun()">
+            <span id="sql-btn-icon">▶</span>
+            <span id="sql-btn-text">Run Query</span>
+          </button>
+          <span id="sql-status" style="font-size:11px; color:var(--muted)"></span>
+        </div>
+        <div id="sql-results" class="sql-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SQL Compare Drawer -->
+  <div class="drawer-overlay" id="sc-overlay" onclick="scClose()"></div>
+  <div class="drawer-content" id="sc-drawer" style="width:920px">
+    <div class="drawer-header">
+      <div class="drawer-title">⚖ SQL Compare — field-by-field</div>
+      <button class="drawer-close-btn" onclick="scClose()">&times;</button>
+    </div>
+    <div class="drawer-body" style="padding:0">
+      <div class="sql-toolbar" style="border-bottom:1px solid var(--border)">
+        <div class="sql-controls-row">
+          <label style="font-size:12px;color:var(--muted);white-space:nowrap">Table:</label>
+          <div class="sql-combo" style="flex:1;position:relative">
+            <input type="text" id="sc-table-search" class="sql-select" style="width:100%;font-family:'JetBrains Mono',monospace" placeholder="— เลือก table — (พิมพ์เพื่อค้นหา)" autocomplete="off" oninput="scFilterTables()" onfocus="scShowTableList()">
+            <div id="sc-table-list" class="sql-combo-list"></div>
+            <input type="hidden" id="sc-table" value="">
+          </div>
+          <span id="sc-db-label" style="font-size:11px;color:var(--muted);white-space:nowrap;padding:0 6px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;height:28px;display:flex;align-items:center"></span>
+        </div>
+        <div id="sc-columns" style="display:none;flex-wrap:wrap;gap:5px;padding:4px 0"></div>
+        <textarea id="sc-sql" class="sql-textarea" placeholder="SELECT col1, col2, col3 FROM `table_name` WHERE ..."
+          spellcheck="false" style="min-height:90px"></textarea>
+        <div style="font-size:11px;color:var(--warn);background:rgba(227,179,65,0.08);border:1px solid rgba(227,179,65,0.3);border-radius:5px;padding:7px 10px;line-height:1.6">
+          ⚠ <strong>ต้อง SELECT Primary Key ทุกครั้ง</strong> — ระบบใช้ PK เพื่อ match แถวระหว่าง Source กับ Target<br>
+          <span style="color:var(--muted)">ถ้า SELECT ไม่รวม PK จะเกิด error "PK column(s) not in SELECT result" — ดู chip สีม่วงด้านบนว่า PK ของ table นี้คืออะไร</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 10px;line-height:1.6">
+          ✓ <strong>ใช้ได้:</strong> SELECT แถวดิบระดับ row-level พร้อม WHERE เงื่อนไขอะไรก็ได้ — ระบบ match แต่ละแถว source/target ด้วย PK ตรงๆ<br>
+          ✗ <strong>ใช้ไม่ได้: GROUP BY / aggregate function (COUNT, SUM, AVG, ...)</strong> — ระบบเติม <code>ORDER BY pk</code> ต่อท้าย query ให้อัตโนมัติเสมอ ถ้า query สรุปผลแล้ว (ไม่มี PK ต่อแถวจริง) จะ error หรือได้ผลไม่ตรงเจตนา ต้องการเทียบผลสรุปแบบนี้ ให้ใช้ <strong>SQL Runner</strong> แทน (รันแยกสองฝั่งดูเทียบเอง ไม่มี auto ORDER BY มายุ่ง)
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button class="sql-run-btn" id="sc-run-btn" onclick="scRun()" style="background:var(--pass)">
+            <span id="sc-btn-icon">⚖</span>
+            <span id="sc-btn-text">Run Compare</span>
+          </button>
+          <button class="sql-run-btn" id="sc-stop-btn" onclick="scStop()" style="display:none;background:var(--fail)">
+            <span>⏹</span>
+            <span>Stop</span>
+          </button>
+          <span id="sc-status" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+      </div>
+      <div id="sc-panel" style="">
+        <div class="rc-empty" style="padding:48px 20px">
+          <div class="rc-empty-icon">⚖</div>
+          <div>เขียน SQL แล้วกด <strong>Run Compare</strong> เพื่อเทียบ field-by-field</div>
+          <div style="margin-top:4px;font-size:11px;color:var(--muted)">ระบุ Key Columns เพื่อ join แถว — ถ้าว่างจะใช้คอลัมน์แรก</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ─── Utility ────────────────────────────────────────────────────────
+    const fmt = n => (typeof n === 'number') ? n.toLocaleString() : (n ?? '—');
+
+    // ─── All-tables state ─────────────────────────────────────────────────────────
+    let atConfig = {};
+    let atEs = null;
+    let atFilter = 'all';
+    let atOpenTable = null;
+    // table -> {src_rows, tgt_rows, has_pk, checks: {row_count, schema, indexes, dup_pk, full_sync}}
+    const atResults = {};
+    const atCounts = { pass: 0, fail: 0, warn: 0, skip: 0 };
+    const atSelected = new Set();   // selected table names for full sync
+    const atTodayOverride = new Set();   // tables with "include today" toggle ON (default OFF)
+    const atTsInfoCache = {};       // table -> ts-info result (persists across SSE re-renders)
+
+    // Per-DB result store — saves/restores atResults+atCounts when switching databases
+    const atDbStore = {};  // db -> { results: {...}, counts: {...} }
+
+    // Year/month-range window for data checks. Empty inputs → null → backend falls back
+    // to config default (last data_window_years calendar years).
+    function atYearWindow() {
+      let yf = parseInt(document.getElementById('at-year-from')?.value, 10);
+      let yt = parseInt(document.getElementById('at-year-to')?.value, 10);
+      let mf = parseInt(document.getElementById('at-month-from')?.value, 10);
+      let mt = parseInt(document.getElementById('at-month-to')?.value, 10);
+      let df = parseInt(document.getElementById('at-day-from')?.value, 10);
+      let dt = parseInt(document.getElementById('at-day-to')?.value, 10);
+      if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
+        [yf, yt] = [yt, yf]; [mf, mt] = [mt, mf]; [df, dt] = [dt, df];
+      }
+      return {
+        year_from:  Number.isFinite(yf) ? yf : null,
+        year_to:    Number.isFinite(yt) ? yt : null,
+        month_from: Number.isFinite(mf) ? mf : null,
+        month_to:   Number.isFinite(mt) ? mt : null,
+        day_from:   Number.isFinite(df) ? df : null,
+        day_to:     Number.isFinite(dt) ? dt : null,
+      };
+    }
+
+    function atSaveDbState() {
+      if (!activeDatabase) return;
+      atDbStore[activeDatabase] = {
+        results: JSON.parse(JSON.stringify(atResults)),
+        counts: { ...atCounts },
+      };
+    }
+
+    function atRestoreDbState(db) {
+      Object.keys(atResults).forEach(k => delete atResults[k]);
+      Object.keys(atCounts).forEach(k => { atCounts[k] = 0; });
+      const saved = atDbStore[db];
+      if (saved) {
+        Object.assign(atResults, JSON.parse(JSON.stringify(saved.results)));
+        Object.assign(atCounts, saved.counts);
+      }
+    }
+
+    // Auto random sample state
+    const autoSampleAborted = new Set();  // tables where user opened drawer — skip auto-sample
+    let autoSampleRunning = false;
+
+    const CHECK_KEYS = ['row_count', 'schema', 'indexes', 'dup_pk', 'full_sync'];
+
+    // State for Settings & Dynamic Database Discovery
+    let activeDatabase = 'prs';
+
+    async function atInitSettings() {
+      await atLoadDatabases();
+      await atLoadConfig();
+    }
+
+    async function atLoadDatabases() {
+      try {
+        const res = await fetch('/api/databases');
+        if (!res.ok) return;
+        const data = await res.json();
+        const selector = document.getElementById('db-selector');
+
+        selector.innerHTML = '';
+        data.databases.forEach(db => {
+          const opt = document.createElement('option');
+          opt.value = db;
+          opt.textContent = db;
+          if (db === data.default) {
+            opt.selected = true;
+            activeDatabase = db;
+          }
+          selector.appendChild(opt);
+        });
+
+        if (data.warning) {
+          console.warn('Database fetch warning:', data.warning);
+        }
+
+        atUpdateDBPlaceholderText(activeDatabase);
+      } catch (err) {
+        console.error('Failed to load databases dropdown:', err);
+      }
+    }
+
+    function atUpdateDBPlaceholderText(db) {
+      const dbSpan = document.getElementById('at-placeholder-db-span');
+      if (dbSpan) {
+        dbSpan.textContent = db;
+      }
+    }
+
+    function onDatabaseChange() {
+      const selector = document.getElementById('db-selector');
+      atSaveDbState();
+      activeDatabase = selector.value;
+      atUpdateDBPlaceholderText(activeDatabase);
+      atRestoreDbState(activeDatabase);
+      atSelected.clear();
+      atUpdateSelBar();
+      atUpdatePills();
+      atRenderTable();
+      atLoadTableList();
+    }
+
+    async function atLoadTableList() {
+      if (!activeDatabase) return;
+      // Already have results — don't overwrite with empty skeleton
+      if (Object.keys(atResults).length > 0) return;
+
+      let tables;
+      try {
+        const res = await fetch('/api/list-tables', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ db: activeDatabase }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.tables || !data.tables.length) return;
+        tables = data.tables;
+      } catch (e) { return; }
+
+      tables.forEach(t => {
+        if (!atResults[t]) atResults[t] = { checks: {}, checks_data: {}, src_rows: null, tgt_rows: null };
+      });
+      document.getElementById('at-table-wrap').style.display = '';
+      document.getElementById('at-placeholder').style.display = 'none';
+      document.getElementById('at-chk-all').checked = false;
+      atRenderTable();
+      atUpdatePills();
+      atUpdateSelBar();
+    }
+
+    async function atLoadConfig() {
+      try {
+        const res = await fetch('/api/config');
+        if (!res.ok) return;
+        const data = await res.json();
+        atConfig = data;
+
+        // Populate source config fields
+        const src = data.source || {};
+        document.getElementById('cfg-src-host').value = src.host || '';
+        document.getElementById('cfg-src-port').value = src.port || '3306';
+        document.getElementById('cfg-src-user').value = src.user || '';
+        document.getElementById('cfg-src-pass').value = src.password || '';
+
+        // Target connections — always a targets[] list; `target` is just the active one (legacy mirror)
+        const tgt = data.target || (Array.isArray(data.targets) && data.targets[0]) || {};
+
+        const tgtVer = tgt.version || 8;
+        const srcVer = src.version || 4;
+        // Update comparison badge
+        const badgeSrcVer  = document.getElementById('badge-src-ver');
+        const badgeSrcHost = document.getElementById('badge-src-host');
+        const badgeTgtVer  = document.getElementById('badge-tgt-ver');
+        const badgeTgtHost = document.getElementById('badge-tgt-host');
+        if (badgeSrcVer)  badgeSrcVer.textContent  = 'MySQL ' + srcVer;
+        if (badgeSrcHost) badgeSrcHost.textContent = src.host || 'source';
+        if (badgeTgtVer)  badgeTgtVer.textContent  = 'MySQL ' + tgtVer;
+        if (badgeTgtHost) badgeTgtHost.textContent = tgt.host || 'target';
+        // legacy badge update kept for any other code
+        const tgtBadge = document.querySelector('.db-badge .v8');
+        if (tgtBadge) tgtBadge.textContent = 'MySQL ' + tgtVer;
+
+        atRenderTargetList(Array.isArray(data.targets) ? data.targets : [], data.active_target);
+
+        // Numeric comparison tuning
+        const tun = data.tuning || {};
+        document.getElementById('cfg-decimal-round').value = tun.decimal_round ?? '';
+        document.getElementById('cfg-decimal-tol').value = tun.decimal_tol ?? '0.0001';
+      } catch (err) {
+        console.error('Failed to load config details:', err);
+      }
+    }
+
+    let atTargets = [];
+    let atActiveTargetName = null;
+
+    function atEsc(s) {
+      const d = document.createElement('div');
+      d.textContent = s == null ? '' : String(s);
+      return d.innerHTML;
+    }
+
+    function atRenderTargetList(targets, activeName) {
+      atTargets = targets;
+      atActiveTargetName = activeName;
+      const list = document.getElementById('cfg-tgt-list');
+      if (!targets.length) {
+        list.innerHTML = '<div style="font-size:12px; color:var(--muted); padding:6px 0;">No targets configured yet — add one below.</div>';
+        return;
+      }
+      list.innerHTML = targets.map(t => {
+        const isActive = t.name === activeName;
+        return `
+          <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid ${isActive ? 'var(--purple)' : 'var(--border)'}; border-radius:6px; background:${isActive ? 'rgba(139,92,246,0.08)' : 'transparent'};">
+            <div style="flex:1; min-width:0;">
+              <div style="font-size:12px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                ${atEsc(t.name)} ${isActive ? '<span style="color:var(--purple); font-weight:500;">· active</span>' : ''}
+              </div>
+              <div style="font-size:11px; color:var(--muted);">${atEsc(t.host)}:${atEsc(t.port)} · MySQL ${atEsc(t.version || 8)}</div>
+            </div>
+            ${isActive ? '' : `<button type="button" onclick="atActivateTarget('${atEsc(t.name)}')" title="Set active" style="padding:4px 8px; font-size:11px; border-radius:4px; border:1px solid var(--border); background:transparent; color:var(--text); cursor:pointer;">Use</button>`}
+            <button type="button" onclick="atShowTargetForm('${atEsc(t.name)}')" title="Edit" style="padding:4px 8px; font-size:11px; border-radius:4px; border:1px solid var(--border); background:transparent; color:var(--text); cursor:pointer;">Edit</button>
+            <button type="button" onclick="atDeleteTarget('${atEsc(t.name)}')" title="Delete" style="padding:4px 8px; font-size:11px; border-radius:4px; border:1px solid var(--fail); background:transparent; color:var(--fail); cursor:pointer;">Del</button>
+          </div>`;
+      }).join('');
+    }
+
+    function atShowTargetForm(editName) {
+      const form = document.getElementById('cfg-tgt-form');
+      const editNameInput = document.getElementById('cfg-tgt-edit-name');
+      const t = editName ? atTargets.find(x => x.name === editName) : null;
+      editNameInput.value = editName || '';
+      document.getElementById('cfg-tgt-name').value = t ? t.name : '';
+      document.getElementById('cfg-tgt-host').value = t ? t.host : '';
+      document.getElementById('cfg-tgt-port').value = t ? t.port : '3306';
+      document.getElementById('cfg-tgt-user').value = t ? t.user : '';
+      document.getElementById('cfg-tgt-pass').value = t ? t.password : '';
+      document.getElementById('cfg-tgt-version').value = t ? (t.version || 8) : '8';
+      document.getElementById('cfg-tgt-status-msg').textContent = '';
+      form.style.display = '';
+    }
+
+    function atHideTargetForm() {
+      document.getElementById('cfg-tgt-form').style.display = 'none';
+      document.getElementById('cfg-tgt-status-msg').textContent = '';
+    }
+
+    async function atSaveTarget() {
+      const btn = document.getElementById('cfg-tgt-save-btn');
+      const msg = document.getElementById('cfg-tgt-status-msg');
+      const editName = document.getElementById('cfg-tgt-edit-name').value;
+
+      const payload = {
+        name: document.getElementById('cfg-tgt-name').value.trim(),
+        host: document.getElementById('cfg-tgt-host').value.trim(),
+        port: parseInt(document.getElementById('cfg-tgt-port').value) || 3306,
+        user: document.getElementById('cfg-tgt-user').value.trim(),
+        password: document.getElementById('cfg-tgt-pass').value,
+        version: parseInt(document.getElementById('cfg-tgt-version').value) || 8
+      };
+
+      btn.disabled = true;
+      btn.classList.add('saving');
+      msg.style.color = 'var(--muted)';
+      msg.textContent = 'Testing connection & saving…';
+
+      try {
+        const res = await fetch(`/api/config/targets${editName ? '/' + encodeURIComponent(editName) : ''}`, {
+          method: editName ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await res.json();
+        btn.disabled = false;
+        btn.classList.remove('saving');
+
+        if (res.ok && result.success) {
+          msg.style.color = 'var(--pass)';
+          msg.textContent = '✓ Target saved!';
+          await atLoadConfig();
+          await atLoadDatabases();
+          setTimeout(atHideTargetForm, 800);
+        } else {
+          msg.style.color = 'var(--fail)';
+          msg.textContent = `✗ ${result.error || 'Failed to save target'}`;
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.classList.remove('saving');
+        msg.style.color = 'var(--fail)';
+        msg.textContent = '✗ Failed: Server unreachable';
+      }
+    }
+
+    async function atActivateTarget(name) {
+      try {
+        const res = await fetch(`/api/config/targets/${encodeURIComponent(name)}/activate`, { method: 'POST' });
+        const result = await res.json();
+        if (res.ok && result.success) {
+          await atLoadConfig();
+          await atLoadDatabases();
+        }
+      } catch (err) {
+        console.error('Failed to activate target:', err);
+      }
+    }
+
+    async function atDeleteTarget(name) {
+      if (!confirm(`Delete target "${name}"?`)) return;
+      try {
+        const res = await fetch(`/api/config/targets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const result = await res.json();
+        if (res.ok && result.success) {
+          await atLoadConfig();
+          await atLoadDatabases();
+        } else {
+          alert(result.error || 'Failed to delete target');
+        }
+      } catch (err) {
+        console.error('Failed to delete target:', err);
+      }
+    }
+
+    function atOpenSettingsDrawer() {
+      atLoadConfig(); // Fresh load
+      document.getElementById('at-settings-overlay').classList.add('active');
+      document.getElementById('at-settings-content').classList.add('active');
+    }
+
+    function atCloseSettingsDrawer() {
+      document.getElementById('at-settings-overlay').classList.remove('active');
+      document.getElementById('at-settings-content').classList.remove('active');
+      document.getElementById('cfg-status-msg').innerHTML = '';
+    }
+
+    async function atSaveConfig() {
+      const btn = document.getElementById('cfg-save-btn');
+      const msg = document.getElementById('cfg-status-msg');
+
+      btn.disabled = true;
+      btn.classList.add('saving');
+      msg.style.color = 'var(--muted)';
+      msg.textContent = 'Testing connections & saving settings…';
+
+      const payload = {
+        source: {
+          host: document.getElementById('cfg-src-host').value.trim(),
+          port: parseInt(document.getElementById('cfg-src-port').value) || 3306,
+          user: document.getElementById('cfg-src-user').value.trim(),
+          password: document.getElementById('cfg-src-pass').value
+        },
+        default_db: activeDatabase,
+        tuning: {
+          decimal_round: document.getElementById('cfg-decimal-round').value.trim(),
+          decimal_tol: document.getElementById('cfg-decimal-tol').value.trim() || '0.0001',
+        }
+      };
+
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const result = await res.json();
+        btn.disabled = false;
+        btn.classList.remove('saving');
+
+        if (res.ok && result.success) {
+          msg.style.color = 'var(--pass)';
+          msg.textContent = '✓ Config saved & connected successfully!';
+
+          await atLoadConfig();
+          await atLoadDatabases();
+
+          setTimeout(() => {
+            atCloseSettingsDrawer();
+          }, 1000);
+        } else {
+          msg.style.color = 'var(--fail)';
+          msg.textContent = `✗ ${result.error || 'Failed to save settings'}`;
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.classList.remove('saving');
+        msg.style.color = 'var(--fail)';
+        msg.textContent = `✗ Failed: Server unreachable`;
+      }
+    }
+
+    async function atToggleIgnoreField(table, column, ignore) {
+      try {
+        const resp = await fetch('/api/config/ignore-fields', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ db: activeDatabase, table, column, ignore, mode: 'full_sync' }),
+        });
+        const result = await resp.json();
+        if (resp.ok && result.success) {
+          if (!atConfig.ignore_fields) atConfig.ignore_fields = {};
+          atConfig.ignore_fields = result.ignore_fields;
+          
+          const bodyEl = document.getElementById('at-drawer-body');
+          if (bodyEl) {
+            bodyEl.innerHTML = atRenderDetailsContent(table, atResults[table]);
+          }
+        } else {
+          alert('Failed to update ignore field settings: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        console.error('Error toggling ignore field:', err);
+        alert('Error: server unreachable');
+      }
+    }
+
+    function atToggleRow(table) {
+      if (atOpenTable === table) {
+        atOpenTable = null;
+      } else {
+        atOpenTable = table;
+      }
+      atRenderTable();
+    }
+
+    function atToggleRowDetails(table) {
+      atOpenDrawer(table);
+    }
+
+    function atOpenDrawer(table) {
+      // User takes over — abort auto-sample for this specific table
+      if (autoSampleRunning) autoSampleAborted.add(table);
+      atOpenTable = table;
+      const d = atResults[table];
+      if (!d) return;
+
+      // Restore random compare state for this table (persist across open/close)
+      rcRestoreForTable(table);
+
+      document.getElementById('at-drawer-title').innerHTML = `🔍 <span class="mono" style="color:var(--blue); font-weight:700;">${table}</span> — Migration Audit Report`;
+      document.getElementById('at-drawer-body').innerHTML = atRenderDetailsContent(table, d);
+
+      // Re-render random compare if data exists
+      if (rcState.batches.length > 0) {
+        rcRender();
+      }
+
+      const overlay = document.getElementById('at-drawer-overlay');
+      const drawer = document.getElementById('at-drawer-content');
+      overlay.classList.add('active');
+      drawer.classList.add('active');
+
+      if (d.checks && d.checks.full_sync) {
+        setTimeout(() => { atFcInit(table); atExpInit(table); }, 150);
+      }
+
+      // Async fetch timestamp/row-count info — pass known pk_cols to skip redundant DB lookup
+      atLoadTsInfo(table, activeDatabase, d.pk_cols || []);
+    }
+
+    function atRenderTsInfo(r) {
+      if (r.has_ts_pk) {
+        return `
+      <div style="margin-bottom:6px; font-size:12px; color:var(--muted)">
+        Timestamp column: <strong style="color:var(--purple); font-family:monospace">${r.ts_col}</strong>
+        ${r.window ? `<span style="margin-left:10px">window: <strong style="font-family:monospace">${r.window}</strong></span>` : ''}
+      </div>
+      <table style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead>
+          <tr>
+            <th style="text-align:left; padding:4px 8px; color:var(--muted); font-weight:500;"></th>
+            <th style="text-align:left; padding:4px 8px; color:var(--src-col)">Source</th>
+            <th style="text-align:left; padding:4px 8px; color:var(--tgt-col)">Target</th>
+            <th style="text-align:center; padding:4px 8px; color:var(--muted)">Match</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-top:1px solid var(--border)">
+            <td style="padding:4px 8px; color:var(--muted)">Oldest row</td>
+            <td style="padding:4px 8px; font-family:monospace; color:var(--src-col)">${r.source_min ?? '—'}</td>
+            <td style="padding:4px 8px; font-family:monospace; color:var(--tgt-col)">${r.target_min ?? '—'}</td>
+            <td style="text-align:center; padding:4px 8px">${r.source_min === r.target_min ? '✅' : '❌'}</td>
+          </tr>
+          <tr style="border-top:1px solid var(--border)">
+            <td style="padding:4px 8px; color:var(--muted)">Newest row</td>
+            <td style="padding:4px 8px; font-family:monospace; color:var(--src-col)">${r.source_max ?? '—'}</td>
+            <td style="padding:4px 8px; font-family:monospace; color:var(--tgt-col)">${r.target_max ?? '—'}</td>
+            <td style="text-align:center; padding:4px 8px">${r.source_max === r.target_max ? '✅' : '❌'}</td>
+          </tr>
+        </tbody>
+      </table>
+    `;
+      } else {
+        const match = r.counts_match;
+        const src = (r.source_count ?? 0).toLocaleString();
+        const tgt = (r.target_count ?? 0).toLocaleString();
+        const diff = Math.abs((r.source_count ?? 0) - (r.target_count ?? 0)).toLocaleString();
+        return `
+      <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+        <div style="font-size:12px; color:var(--muted)">No timestamp PK — row count comparison:</div>
+        <div style="display:flex; align-items:center; gap:24px;">
+          <div style="text-align:center">
+            <div style="font-size:18px; font-weight:700; color:var(--src-col); font-family:monospace">${src}</div>
+            <div style="font-size:11px; color:var(--muted)">Source</div>
+          </div>
+          <div style="font-size:20px; color:var(--muted)">vs</div>
+          <div style="text-align:center">
+            <div style="font-size:18px; font-weight:700; color:var(--tgt-col); font-family:monospace">${tgt}</div>
+            <div style="font-size:11px; color:var(--muted)">Target</div>
+          </div>
+          <div style="padding:4px 12px; border-radius:6px; font-weight:700; font-size:13px;
+                      background:${match ? 'var(--pass-bg)' : 'var(--fail-bg)'};
+                      color:${match ? 'var(--green)' : 'var(--red)'}">
+            ${match ? '✅ Equal' : `❌ Diff: ${diff} rows`}
+          </div>
+        </div>
+      </div>
+    `;
+      }
+    }
+
+    // Cache key includes the year window — changing years must refetch, not reuse
+    function atTsCacheKey(table) {
+      const w = atYearWindow();
+      return `${table}|${w.year_from ?? ''}|${w.year_to ?? ''}|${w.month_from ?? ''}|${w.month_to ?? ''}|${w.day_from ?? ''}|${w.day_to ?? ''}`;
+    }
+
+    async function atLoadTsInfo(table, db, pkCols) {
+      // Restore from cache immediately if available (avoids blank on SSE re-render)
+      if (atTsInfoCache[atTsCacheKey(table)]) {
+        const body = document.getElementById('ts-info-body');
+        if (body) body.innerHTML = atRenderTsInfo(atTsInfoCache[atTsCacheKey(table)]);
+        return;
+      }
+      const body = document.getElementById('ts-info-body');
+      if (!body) return;
+      try {
+        const resp = await fetch('/api/table-timestamp-info', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table, db, pk_cols: pkCols, ...atYearWindow() }),
+        });
+        const r = await resp.json();
+        if (!resp.ok || r.error) {
+          const el = document.getElementById('ts-info-body');
+          if (el) el.innerHTML = `<span style="color:var(--red)">${r.error || 'Failed to load'}</span>`;
+          return;
+        }
+        atTsInfoCache[atTsCacheKey(table)] = r;
+        // Re-query element in case SSE re-rendered the drawer while we were fetching
+        const el = document.getElementById('ts-info-body');
+        if (el) el.innerHTML = atRenderTsInfo(r);
+      } catch (err) {
+        const el = document.getElementById('ts-info-body');
+        if (el) el.innerHTML = `<span style="color:var(--red)">Error: ${err.message}</span>`;
+      }
+    }
+
+    function atCloseDrawer() {
+      // Save random compare state before closing
+      rcSaveForTable();
+      atOpenTable = null;
+      const overlay = document.getElementById('at-drawer-overlay');
+      const drawer = document.getElementById('at-drawer-content');
+      overlay.classList.remove('active');
+      drawer.classList.remove('active');
+    }
+
+
+    function parseSchemaDiff(str) {
+      if (str.includes(': missing in target')) {
+        const col = str.split(': ')[0];
+        return { col, src: 'Present', tgt: 'Missing', type: 'missing', desc: 'Missing in target database' };
+      }
+      if (str.includes(': extra in target')) {
+        const col = str.split(': ')[0];
+        return { col, src: 'Missing', tgt: 'Extra (New)', type: 'extra', desc: 'Extra column in target' };
+      }
+      if (str.includes(': type ') && str.includes(' vs ')) {
+        const col = str.split(': ')[0];
+        const typesPart = str.split(': type ')[1] || '';
+        const parts = typesPart.split(' vs ');
+        return { col, src: parts[0] || '—', tgt: parts[1] || '—', type: 'mismatch', desc: 'Data type mismatch' };
+      }
+      if (str.includes(' → ') && str.includes(' (precision')) {
+        const col = str.split(': ')[0];
+        const typesPart = str.split(': ')[1] || '';
+        const parts = typesPart.split(' → ');
+        const srcType = parts[0] || '—';
+        const tgtType = (parts[1] || '').split(' (precision')[0] || '—';
+        return { col, src: srcType, tgt: tgtType, type: 'warning', desc: 'Expected double precision drift' };
+      }
+      return { col: str, src: '—', tgt: '—', type: 'unknown', desc: 'Configuration drift' };
+    }
+
+    function renderSyncSummaryHtml(str) {
+      if (!str || str === '—') return `<div class="det-summary-text mono" style="margin-bottom:8px;">—</div>`;
+
+      // Format: src=62,008 tgt=61,933 matched=0 mismatch=0 missing=62,008 extra=61,933 (10/10 chunks scanned, 100% of table)
+      const regex = /src=([\d,]+)\s+tgt=([\d,]+)\s+matched=([\d,]+)\s+mismatch=([\d,]+)\s+missing=([\d,]+)\s+extra=([\d,]+)(?:\s+\(([^)]+)\))?/;
+      const match = str.match(regex);
+      if (!match) {
+        return `<div class="det-summary-text mono" style="margin-bottom:8px;">${str}</div>`;
+      }
+
+      const stats = {
+        src: match[1],
+        tgt: match[2],
+        matched: match[3],
+        mismatch: match[4],
+        missing: match[5],
+        extra: match[6],
+        progress: match[7] || ''
+      };
+
+      const hasMismatch = parseInt(stats.mismatch.replace(/,/g, '')) > 0;
+      const hasMissing = parseInt(stats.missing.replace(/,/g, '')) > 0;
+      const hasExtra = parseInt(stats.extra.replace(/,/g, '')) > 0;
+
+      return `
+    <div class="stats-grid">
+      <div class="stat-card src">
+        <div class="stat-label">Source Rows</div>
+        <div class="stat-val">${stats.src}</div>
+      </div>
+      <div class="stat-card tgt">
+        <div class="stat-label">Target Rows</div>
+        <div class="stat-val">${stats.tgt}</div>
+      </div>
+      <div class="stat-card match">
+        <div class="stat-label">Matched</div>
+        <div class="stat-val">${stats.matched}</div>
+      </div>
+      <div class="stat-card mismatch">
+        <div class="stat-label">Mismatched</div>
+        <div class="stat-val" style="color:${hasMismatch ? 'var(--fail)' : 'var(--text)'}">${stats.mismatch}</div>
+      </div>
+      <div class="stat-card missing">
+        <div class="stat-label">Missing</div>
+        <div class="stat-val" style="color:${hasMissing ? 'var(--warn)' : 'var(--text)'}">${stats.missing}</div>
+      </div>
+      <div class="stat-card extra">
+        <div class="stat-label">Extra</div>
+        <div class="stat-val" style="color:${hasExtra ? 'var(--blue)' : 'var(--text)'}">${stats.extra}</div>
+      </div>
+    </div>
+    ${stats.progress ? `<div class="stat-progress-bar">⌛ Progress: <strong>${stats.progress}</strong></div>` : ''}
+  `;
+    }
+
+    function atRenderDetailsContent(table, d) {
+      const cd = d.checks_data || {};
+
+      // Row Count Card
+      const rc = cd.row_count || {};
+      const rcStatus = rc.status || 'SKIP';
+      const rcData = rc.data || {};
+      const rcSummary = rcData.summary || rc.summary || '—';
+
+      // Schema Card
+      const sch = cd.schema || {};
+      const schStatus = sch.status || 'SKIP';
+      const schData = sch.data || {};
+      const schDiffs = schData.diffs || [];
+      const schWarns = schData.warnings || [];
+      const schSummary = schData.summary || sch.summary || '—';
+
+      // Indexes Card
+      const idx = cd.indexes || {};
+      const idxStatus = idx.status || 'SKIP';
+      const idxData = idx.data || {};
+      const idxMissing = idxData.missing || [];
+      const idxMismatched = idxData.mismatched || [];
+      const idxSummary = idxData.summary || idx.summary || '—';
+
+      // Full Sync Card
+      const sync = cd.full_sync || {};
+      const syncStatus = sync.status || 'SKIP';
+      const syncData = sync.data || {};
+      const syncSummary = syncData.summary || sync.summary || '—';
+
+      let schemaDetailsHtml = '';
+      const allCols = schData.columns || [];
+      if (allCols.length > 0) {
+        const STATUS_TAG = {
+          match: `<span class="det-type-tag" style="background:var(--pass-bg);color:var(--green)">MATCH</span>`,
+          mismatch: `<span class="det-type-tag mismatch">MISMATCH</span>`,
+          missing: `<span class="det-type-tag missing">MISSING</span>`,
+          extra: `<span class="det-type-tag extra">EXTRA</span>`,
+          warning: `<span class="det-type-tag" style="background:#fff3cd;color:#856404">WARNING</span>`,
+        };
+        const ROW_CLS = { match: '', mismatch: 'mismatch-row', missing: 'missing-row', extra: 'extra-row', warning: '' };
+        const fsIgnores = (atConfig.ignore_fields && atConfig.ignore_fields.full_sync) || {};
+        const ignored = (fsIgnores[activeDatabase] && fsIgnores[activeDatabase][table]) || [];
+        schemaDetailsHtml = `
+      <div class="det-scroll-box" style="margin-top:8px;">
+        <table class="det-sample-table">
+          <thead>
+            <tr>
+              <th style="width: 60px; text-align: center;">Ignore</th>
+              <th>Column Name</th>
+              <th>Source</th>
+              <th>Target</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${allCols.map(c => {
+              const isPk = (d.pk_cols || []).includes(c.name);
+              const isIgnored = ignored.includes(c.name);
+              const checkboxHtml = isPk
+                ? `<input type="checkbox" checked disabled title="Primary key (cannot be ignored)" style="cursor: not-allowed; opacity: 0.5;" />`
+                : `<input type="checkbox" ${isIgnored ? 'checked' : ''} onchange="atToggleIgnoreField('${table}', '${c.name}', this.checked)" style="cursor: pointer; transform: scale(1.15);" />`;
+              const rowClass = (isIgnored && !isPk) ? 'ignored-row' : (ROW_CLS[c.status] || '');
+              return `<tr class="${rowClass}">
+                <td style="text-align: center; vertical-align: middle;">${checkboxHtml}</td>
+                <td><strong style="color:var(--text);font-family:'JetBrains Mono',monospace">${c.name}</strong></td>
+                <td><code style="color:var(--src-col)">${c.src_type ?? '—'}</code></td>
+                <td><code style="color:var(--tgt-col)">${c.tgt_type ?? '—'}</code></td>
+                <td>${STATUS_TAG[c.status] ?? ''}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+      } else {
+        // Fallback for old data without columns field — use parsed diffs
+        const parsedDiffs = [];
+        schDiffs.forEach(d => parsedDiffs.push(parseSchemaDiff(d)));
+        schWarns.forEach(w => parsedDiffs.push(parseSchemaDiff(w)));
+        if (parsedDiffs.length > 0) {
+          schemaDetailsHtml = `
+        <div class="det-scroll-box" style="margin-top: 8px;">
+          <table class="det-sample-table">
+            <thead>
+              <tr>
+                <th>Column Name</th>
+                <th>Source</th>
+                <th>Target</th>
+                <th>Drift Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${parsedDiffs.map(d => {
+            let statusTag = '';
+            let rowCls = '';
+            if (d.type === 'missing') {
+              statusTag = `<span class="det-type-tag mismatch">MISSING</span>`;
+              rowCls = 'mismatch-row';
+            } else if (d.type === 'extra') {
+              statusTag = `<span class="det-type-tag extra">EXTRA</span>`;
+              rowCls = 'extra-row';
+            } else if (d.type === 'mismatch') {
+              statusTag = `<span class="det-type-tag mismatch">MISMATCH</span>`;
+              rowCls = 'mismatch-row';
+            } else {
+              statusTag = `<span class="det-type-tag missing">WARNING</span>`;
+              rowCls = 'missing-row';
+            }
+            return `<tr class="${rowCls}">
+                  <td><strong style="color:var(--text); font-family: 'JetBrains Mono', monospace;">${d.col}</strong></td>
+                  <td><code style="color:var(--src-col);">${d.src}</code></td>
+                  <td><code style="color:var(--tgt-col);">${d.tgt}</code></td>
+                  <td>${statusTag}</td>
+                </tr>`;
+          }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+        } else {
+          schemaDetailsHtml = `<div class="det-empty">No schema mismatches detected.</div>`;
+        }
+      }
+
+      let indexDetailsHtml = '';
+      if (idxMissing.length > 0 || idxMismatched.length > 0) {
+        const srcIndexes = idxData.src_indexes || {};
+        const tgtIndexes = idxData.tgt_indexes || {};
+
+        indexDetailsHtml = `
+      <div class="det-scroll-box" style="margin-top: 8px;">
+        <table class="det-sample-table">
+          <thead>
+            <tr>
+              <th>Index Name</th>
+              <th>Source Definition</th>
+              <th>Target Definition</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${idxMissing.map(m => {
+          const cols = srcIndexes[m] ? srcIndexes[m].join(', ') : '—';
+          return `<tr class="mismatch-row">
+                <td><strong style="color:var(--text); font-family: 'JetBrains Mono', monospace;">${m}</strong></td>
+                <td><code>(${cols})</code></td>
+                <td><code class="fail-text">Missing</code></td>
+                <td><span class="det-type-tag mismatch">MISSING</span></td>
+              </tr>`;
+        }).join('')}
+            ${idxMismatched.map(m => {
+          const srcCols = srcIndexes[m] ? srcIndexes[m].join(', ') : '—';
+          const tgtCols = tgtIndexes[m] ? tgtIndexes[m].join(', ') : '—';
+          return `<tr class="mismatch-row">
+                <td><strong style="color:var(--text); font-family: 'JetBrains Mono', monospace;">${m}</strong></td>
+                <td><code>(${srcCols})</code></td>
+                <td><code style="color:var(--warn);">${tgtCols}</code></td>
+                <td><span class="det-type-tag mismatch">MISMATCH</span></td>
+              </tr>`;
+        }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+      } else {
+        indexDetailsHtml = `<div class="det-empty">No index mismatches detected.</div>`;
+      }
+
+      let syncDetailsHtml = '';
+      if (syncStatus === 'FAIL') {
+        syncDetailsHtml = '';
+      } else if (syncStatus === 'SKIP') {
+        syncDetailsHtml = `<div class="det-empty">Full sync was skipped for this table.</div>`;
+      } else {
+        syncDetailsHtml = `<div class="det-empty pass-text">✓ All rows and fields are 100% in sync!</div>`;
+      }
+
+      return `
+    <div class="det-grid">
+      <!-- Left Card: Metadata Checks -->
+      <div class="det-card">
+        <div class="det-card-title">📋 Structure & Counts</div>
+        
+        <div class="det-status-row">
+          <span class="det-status-badge ${rcStatus.toLowerCase()}">${rcStatus}</span>
+          <div class="det-status-info">
+            <div class="det-label">Row Count Verification</div>
+            <div class="det-desc mono">${rcSummary}</div>
+          </div>
+        </div>
+        
+        <div class="det-status-row" style="margin-top:14px;">
+          <span class="det-status-badge enforced">PASS</span>
+          <div class="det-status-info">
+            <div class="det-label">Primary Key Integrity</div>
+            <div class="det-desc">Enforced via database PRIMARY KEY constraints</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Middle Card: Schema & Indexes -->
+      <div class="det-card">
+        <div class="det-card-title">📐 Schema & Indexes</div>
+        
+        <div class="det-sub-sec">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="det-status-badge sm ${schStatus.toLowerCase()}">${schStatus}</span>
+            <strong>Schema Columns</strong>
+          </div>
+          <div class="det-summary-text">${schSummary}</div>
+          ${schemaDetailsHtml}
+        </div>
+
+        <div class="det-sub-sec" style="margin-top:14px; border-top: 1px solid var(--border); padding-top:12px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="det-status-badge sm ${idxStatus.toLowerCase()}">${idxStatus}</span>
+            <strong>Index Coverage</strong>
+          </div>
+          <div class="det-summary-text">${idxSummary}</div>
+          ${indexDetailsHtml}
+        </div>
+      </div>
+    </div>
+
+    <!-- Full Sync: Full-width outside the 2-column grid -->
+    <div class="det-card" style="margin-top: 20px;">
+      <div class="det-card-title">🔄 Full Field Sync Details</div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <span class="det-status-badge ${syncStatus.toLowerCase()}">${syncStatus}</span>
+        <strong>Row-by-Row Comparison Status</strong>
+      </div>
+      ${renderSyncSummaryHtml(syncSummary)}
+      ${syncDetailsHtml}
+    </div>
+
+    <!-- Full Comparison View: All rows (match + discrepancy) -->
+    ${(syncStatus === 'FAIL' || syncStatus === 'PASS') ? atBuildFullCompareHtml(table) : ''}
+
+    <!-- All Mismatches Explorer: Full-width -->
+    ${atBuildMismatchesExplorerHtml(table, d)}
+
+    <!-- Timestamp / Row Count Info Card -->
+    <div class="det-card" id="ts-info-card" style="margin-top: 20px;">
+      <div class="det-card-title">🕐 Timestamp Range & Row Count</div>
+      <div id="ts-info-body" style="color:var(--muted); font-size:13px;">Loading…</div>
+    </div>
+
+    <!-- Random Field-by-Field Comparison: Full-width -->
+    ${rcBuildPanelHtml(table)}
+  `;
+    }
+
+    function atBadge(status) {
+      if (!status) return `<span class="at-check-badge skip">–</span>`;
+      const icons = { PASS: '✓', FAIL: '✗', WARN: '!', SKIP: '–' };
+      const cls = { PASS: 'pass', FAIL: 'fail', WARN: 'warn', SKIP: 'skip' }[status] || 'skip';
+      return `<span class="at-check-badge ${cls}" title="${status}">${icons[status] || '–'}</span>`;
+    }
+
+    function atTableStatus(checks) {
+      const vals = Object.values(checks);
+      if (vals.includes('FAIL')) return 'fail';
+      if (vals.includes('WARN')) return 'warn';
+      if (vals.some(v => v === 'PASS')) return 'pass';
+      return 'skip';
+    }
+
+    function atDetailSnippet(checks_data) {
+      const issues = [];
+      for (const [key, data] of Object.entries(checks_data)) {
+        if (data && data.status === 'FAIL' && data.summary) {
+          issues.push(data.summary.slice(0, 80));
+        }
+      }
+      return issues.slice(0, 2).join(' | ');
+    }
+
+    function atToggleRowDetails(table) {
+      atOpenDrawer(table);
+    }
+
+    function atToggleRowSelection(table, checked) {
+      if (checked) atSelected.add(table); else atSelected.delete(table);
+      atUpdateSelBar();
+    }
+
+    function atToggleTodayOverride(table, checked) {
+      if (checked) atTodayOverride.add(table); else atTodayOverride.delete(table);
+    }
+
+    function atToggleAll(checked) {
+      document.querySelectorAll('#at-tbody input[type=checkbox]').forEach(cb => {
+        const table = cb.closest('tr').querySelector('.at-tname').textContent;
+        if (checked) atSelected.add(table); else atSelected.delete(table);
+        cb.checked = checked;
+      });
+      atUpdateSelBar();
+    }
+
+    function atRenderTable() {
+      const tbody = document.getElementById('at-tbody');
+      const wrap = document.getElementById('at-table-wrap');
+      const ph = document.getElementById('at-placeholder');
+
+      const entries = Object.entries(atResults);
+      if (!entries.length) {
+        wrap.style.display = 'none'; ph.style.display = '';
+        return;
+      }
+      wrap.style.display = ''; ph.style.display = 'none';
+
+      const rows = entries
+        .filter(([, d]) => {
+          const st = atTableStatus(d.checks || {});
+          if (atFilter === 'all') return true;
+          if (atFilter === 'fail') return st === 'fail';
+          if (atFilter === 'warn') return st === 'warn';
+          if (atFilter === 'pass') return st === 'pass';
+          return true;
+        })
+        .sort((a, b) => a[0].localeCompare(b[0]));
+
+      const htmlBuffer = [];
+      rows.forEach(([table, d]) => {
+        const checks = d.checks || {};
+        const checksData = d.checks_data || {};
+        const st = atTableStatus(checks);
+        const detail = atDetailSnippet(checksData);
+        const srcRows = d.src_rows != null ? d.src_rows.toLocaleString() : '—';
+        const tgtRows = d.tgt_rows != null ? d.tgt_rows.toLocaleString() : '—';
+        const checked = atSelected.has(table) ? 'checked' : '';
+        const todayOn = atTodayOverride.has(table) ? 'checked' : '';
+
+        htmlBuffer.push(`<tr class="at-row ${st}-row">
+      <td style="text-align:center; position:relative; z-index:10" onclick="event.stopPropagation()">
+        <input type="checkbox" ${checked} onchange="atToggleRowSelection('${table}',this.checked)">
+      </td>
+      <td onclick="atToggleRowDetails('${table}')"><span class="at-tname">${table}</span></td>
+      <td onclick="atToggleRowDetails('${table}')"><span class="at-rows">${srcRows}</span></td>
+      <td onclick="atToggleRowDetails('${table}')"><span class="at-rows">${tgtRows}</span></td>
+      ${CHECK_KEYS.map(k => `<td style="text-align:center" onclick="atToggleRowDetails('${table}')">${atBadge(checks[k])}</td>`).join('')}
+      <td class="at-detail-cell" onclick="atToggleRowDetails('${table}')"><code title="${detail}">${detail || '—'}</code></td>
+      <td class="at-today-cell" onclick="event.stopPropagation()">
+        <label class="at-today-switch" title="เปิด: ตรวจข้อมูลได้ถึงวันนี้ / ปิด: ตรวจถึงสิ้นวันเมื่อวาน (ค่าเริ่มต้น)">
+          <input type="checkbox" ${todayOn} onchange="atToggleTodayOverride('${table}',this.checked)">
+          <span class="at-today-slider"></span>
+        </label>
+      </td>
+    </tr>`);
+      });
+
+      tbody.innerHTML = htmlBuffer.join('');
+      atUpdateSelBar();
+    }
+
+    function atSelectAll() {
+      document.getElementById('at-chk-all').checked = true;
+      atToggleAll(true);
+    }
+
+    function atSelectNone() {
+      document.getElementById('at-chk-all').checked = false;
+      atToggleAll(false);
+    }
+
+    function atUpdateSelBar() {
+      const n = atSelected.size;
+      const bar = document.getElementById('at-sel-bar');
+      bar.style.display = Object.keys(atResults).length ? 'flex' : 'none';
+      document.getElementById('at-sel-count').textContent = `${n} selected`;
+      const show = n > 0 ? 'flex' : 'none';
+      document.getElementById('at-sync-btn').style.display = show;
+      document.getElementById('at-sync-btn-text').textContent = `Run Full Sync on Selected (${n})`;
+      document.getElementById('at-quick-btn').style.display = show;
+      document.getElementById('at-quick-btn-text').textContent = `Quick Scan Selected (${n})`;
+    }
+
+    function atSetFilter(f) {
+      atFilter = f;
+      document.querySelectorAll('.at-filter-btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+      atRenderTable();
+    }
+
+    async function autoSampleOne(table) {
+      if (autoSampleAborted.has(table)) return;
+      if (rcTableCache[table]) return;   // already has data — skip
+      try {
+        const resp = await fetch('/api/random-compare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table, db: activeDatabase, seed: null, sample_offset: 0, sample_size: 1000, ...atYearWindow() }),
+        });
+        if (autoSampleAborted.has(table)) return;  // user opened drawer while fetching
+        const result = await resp.json();
+        if (!resp.ok || autoSampleAborted.has(table)) return;
+        rcTableCache[table] = {
+          batches: [result], currentBatch: 0, currentPage: 0,
+          tableSeed: result.seed, nextOffset: result.next_offset, filter: 'all',
+        };
+        document.getElementById('at-run-time').textContent =
+          `Auto sampling… (${Object.keys(rcTableCache).length}/${Object.keys(atResults).length} done)`;
+      } catch (_) { /* skip on error */ }
+    }
+
+    async function autoSampleAllTables() {
+      if (!document.getElementById('at-auto-sample')?.checked) return;
+      autoSampleRunning = true;
+      autoSampleAborted.clear();
+      const tables = Object.keys(atResults).sort();
+      for (const table of tables) {
+        if (!autoSampleRunning) break;  // runAllTables() fired — stop immediately
+        await autoSampleOne(table);
+      }
+      if (autoSampleRunning) {
+        autoSampleRunning = false;
+        document.getElementById('at-run-time').textContent = `Completed (random sample ready)`;
+      }
+    }
+
+    function atUpdatePills() {
+      document.getElementById('at-pill-pass').textContent = atCounts.pass;
+      document.getElementById('at-pill-fail').textContent = atCounts.fail;
+      document.getElementById('at-pill-warn').textContent = atCounts.warn;
+      document.getElementById('at-pill-skip').textContent = atCounts.skip;
+    }
+
+    function atHandleEvent(ev) {
+      if (ev.type === 'meta') {
+        if (ev.only_in_src && ev.only_in_src.length) {
+          const el = document.getElementById('at-missing-list');
+          el.style.display = '';
+          el.innerHTML = `<strong>⚠ Tables only in source (not migrated):</strong> ${ev.only_in_src.join(', ')}`;
+          document.getElementById('at-missing-badge').style.display = '';
+          document.getElementById('at-missing-count').textContent = ev.only_in_src.length;
+        }
+        document.getElementById('at-progress-text').textContent = `${ev.total_tables} tables`;
+        // Sync the DB selector to match the database this snapshot was recorded for
+        if (ev.database) {
+          const sel = document.getElementById('db-selector');
+          if (sel && sel.value !== ev.database) {
+            for (const opt of sel.options) {
+              if (opt.value === ev.database) { opt.selected = true; break; }
+            }
+          }
+          activeDatabase = ev.database;
+          atUpdateDBPlaceholderText(ev.database);
+        }
+        return;
+      }
+
+      if (ev.type === 'table_start') {
+        if (!atResults[ev.table]) {
+          atResults[ev.table] = { checks: {}, checks_data: {} };
+        }
+        atResults[ev.table].src_rows = ev.src_rows;
+        atResults[ev.table].has_pk = ev.has_pk;
+        atResults[ev.table].pk_cols = ev.pk_cols;
+        return;
+      }
+
+      if (ev.type === 'result') {
+        if (!atResults[ev.table]) {
+          atResults[ev.table] = { checks: {}, checks_data: {} };
+        }
+        const prev = atResults[ev.table].checks[ev.check];
+        atResults[ev.table].checks[ev.check] = ev.status;
+        atResults[ev.table].checks_data[ev.check] = ev;
+
+        if (ev.check === 'row_count' && ev.data) {
+          atResults[ev.table].tgt_rows = ev.data.target;
+        }
+
+        // Update table-level status counts when all checks arrive
+        const allDone = CHECK_KEYS.every(k => atResults[ev.table].checks[k]);
+        if (allDone && !atResults[ev.table]._counted) {
+          atResults[ev.table]._counted = true;
+          const st = atTableStatus(atResults[ev.table].checks);
+          atCounts[st === 'fail' ? 'fail' : st === 'warn' ? 'warn' : st === 'pass' ? 'pass' : 'skip']++;
+          atUpdatePills();
+        }
+
+        if (ev.table === atOpenTable) {
+          document.getElementById('at-drawer-body').innerHTML = atRenderDetailsContent(atOpenTable, atResults[atOpenTable]);
+          // Restore ts-info from cache after re-render (SSE wipes the drawer innerHTML)
+          if (atTsInfoCache[atTsCacheKey(atOpenTable)]) {
+            const el = document.getElementById('ts-info-body');
+            if (el) el.innerHTML = atRenderTsInfo(atTsInfoCache[atTsCacheKey(atOpenTable)]);
+          }
+        }
+        atRenderTable();
+        return;
+      }
+
+      if (ev.type === 'done') {
+        const btn = document.getElementById('at-run-btn');
+        btn.disabled = false;
+        btn.classList.remove('running');
+        document.getElementById('at-btn-text').textContent = 'Run Validation';
+        document.getElementById('at-run-time').textContent = `Completed`;
+        if (atEs) { atEs.close(); atEs = null; }
+        atSaveDbState();   // snapshot results into store so switching DB preserves them
+        autoSampleAllTables();
+        return;
+      }
+    }
+
+    async function atAutoRandomCompare() {
+      const tables = Object.keys(atResults);
+      if (!tables.length) return;
+
+      const statusEl = document.getElementById('at-run-time');
+      for (let i = 0; i < tables.length; i++) {
+        const table = tables[i];
+        statusEl.textContent = `Auto-sampling ${i + 1}/${tables.length}: ${table}`;
+
+        // Skip if user already sampled this table manually
+        if (rcTableCache[table] && rcTableCache[table].batches && rcTableCache[table].batches.length > 0) {
+          continue;
+        }
+        if (!rcTableCache[table]) {
+          rcTableCache[table] = {
+            batches: [], currentBatch: -1, currentPage: 0,
+            tableSeed: null, nextOffset: 0, filter: 'all',
+          };
+        }
+        const cache = rcTableCache[table];
+
+        try {
+          const resp = await fetch('/api/random-compare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              table,
+              db: activeDatabase,
+              seed: cache.tableSeed,
+              sample_offset: cache.nextOffset,
+              sample_size: 1000,
+              ...atYearWindow(),
+            }),
+          });
+          const result = await resp.json();
+          if (resp.ok && !result.error) {
+            cache.tableSeed = result.seed;
+            cache.nextOffset = result.next_offset;
+            cache.batches.push(result);
+            cache.currentBatch = cache.batches.length - 1;
+            // Re-render drawer if this table is currently open
+            if (atOpenTable === table) {
+              rcRestoreForTable(table);
+              rcRender();
+            }
+          }
+        } catch (err) {
+          console.warn(`Auto random compare failed for ${table}:`, err);
+        }
+      }
+      statusEl.textContent = `Completed — auto-sampled ${tables.length} table(s)`;
+    }
+
+    async function runSyncSelected() {
+      if (!atSelected.size) return;
+      const btn = document.getElementById('at-sync-btn');
+      btn.disabled = true;
+      btn.classList.add('running');
+      document.getElementById('at-run-time').textContent = `Running full sync on ${atSelected.size} table(s)…`;
+
+      // Stop any running process first (handles mid-sync refresh case where
+      // sendBeacon fired but process hasn't died yet).  Stop endpoint blocks
+      // until process is actually dead so the /run call won't hit 409.
+      try { await fetch('/api/all-tables/stop', { method: 'POST' }); } catch (e) { /* ignore */ }
+
+      // Snapshot all existing results — server resets its buffer on every /run call,
+      // so only selected-table events come back.  We restore non-selected tables
+      // from this snapshot after the stream ends so their data is never lost.
+      const snapshot = {};
+      Object.entries(atResults).forEach(([k, v]) => {
+        snapshot[k] = { ...v, checks: { ...v.checks }, checks_data: { ...v.checks_data } };
+      });
+
+      const resp = await fetch('/api/all-tables/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ db: activeDatabase, skip_sync: false, tables: [...atSelected], today_tables: [...atTodayOverride], ...atYearWindow() })
+      });
+      if (!resp.ok) {
+        alert('Failed to start sync');
+        btn.disabled = false; btn.classList.remove('running');
+        return;
+      }
+
+      if (atEs) atEs.close();
+      atEs = new EventSource('/api/all-tables/stream');
+      atEs.onmessage = e => {
+        try {
+          const ev = JSON.parse(e.data);
+          if (ev.type === 'done') {
+            btn.disabled = false; btn.classList.remove('running');
+            document.getElementById('at-run-time').textContent = 'Full sync completed';
+            atEs.close(); atEs = null;
+            // Restore any non-selected table that lost its data during this run
+            Object.entries(snapshot).forEach(([k, v]) => {
+              if (!atSelected.has(k) && !atResults[k]) atResults[k] = v;
+            });
+            // Merge full_sync results from this run back into snapshot entries so
+            // selected tables keep their fresh result even if they existed before
+            atSelected.forEach(k => {
+              if (snapshot[k] && atResults[k]) {
+                atResults[k] = {
+                  ...snapshot[k],
+                  ...atResults[k],
+                  checks: { ...snapshot[k].checks, ...atResults[k].checks },
+                  checks_data: { ...snapshot[k].checks_data, ...atResults[k].checks_data },
+                };
+              }
+            });
+            atSaveDbState();   // persist merged results so DB switch preserves them
+            atRenderTable();
+          } else {
+            atHandleEvent(ev);   // merges into existing results (no clear)
+          }
+        } catch (ex) { console.warn('sync SSE parse error', ex); }
+      };
+      atEs.onerror = () => { atEs.close(); atEs = null; };
+
+    }
+
+    async function runQuickSelected() {
+      if (!atSelected.size) return;
+      const btn = document.getElementById('at-quick-btn');
+      btn.disabled = true;
+      btn.classList.add('running');
+      document.getElementById('at-run-time').textContent = `Running quick scan on ${atSelected.size} table(s)…`;
+
+      try { await fetch('/api/all-tables/stop', { method: 'POST' }); } catch (e) { /* ignore */ }
+
+      // Snapshot existing results — server only returns selected tables; restore rest after.
+      const snapshot = {};
+      Object.entries(atResults).forEach(([k, v]) => {
+        snapshot[k] = { ...v, checks: { ...v.checks }, checks_data: { ...v.checks_data } };
+      });
+
+      const resp = await fetch('/api/all-tables/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ db: activeDatabase, skip_sync: true, tables: [...atSelected], today_tables: [...atTodayOverride], ...atYearWindow() })
+      });
+      if (!resp.ok) {
+        alert('Failed to start quick scan');
+        btn.disabled = false; btn.classList.remove('running');
+        return;
+      }
+
+      if (atEs) atEs.close();
+      atEs = new EventSource('/api/all-tables/stream');
+      atEs.onmessage = e => {
+        try {
+          const ev = JSON.parse(e.data);
+          if (ev.type === 'done') {
+            btn.disabled = false; btn.classList.remove('running');
+            document.getElementById('at-quick-btn-text').textContent = `Quick Scan Selected (${atSelected.size})`;
+            document.getElementById('at-run-time').textContent = 'Quick scan completed';
+            atEs.close(); atEs = null;
+            // Restore non-selected tables
+            Object.entries(snapshot).forEach(([k, v]) => {
+              if (!atSelected.has(k) && !atResults[k]) atResults[k] = v;
+            });
+            // Merge fresh results for selected tables
+            atSelected.forEach(k => {
+              if (snapshot[k] && atResults[k]) {
+                atResults[k] = {
+                  ...snapshot[k],
+                  ...atResults[k],
+                  checks: { ...snapshot[k].checks, ...atResults[k].checks },
+                  checks_data: { ...snapshot[k].checks_data, ...atResults[k].checks_data },
+                };
+              }
+            });
+            atSaveDbState();
+            atRenderTable();
+          } else {
+            atHandleEvent(ev);
+          }
+        } catch (ex) { console.warn('quick SSE parse error', ex); }
+      };
+      atEs.onerror = () => { atEs.close(); atEs = null; };
+    }
+
+    async function runAllTables() {
+      const btn = document.getElementById('at-run-btn');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.classList.add('running');
+      document.getElementById('at-btn-text').textContent = 'Running…';
+      document.getElementById('at-run-time').textContent = '';
+      document.getElementById('at-missing-list').style.display = 'none';
+      document.getElementById('at-missing-badge').style.display = 'none';
+
+      // Reset state (also clear this DB's store so stale data doesn't linger)
+      delete atDbStore[activeDatabase];
+      Object.keys(atResults).forEach(k => delete atResults[k]);
+      Object.keys(atCounts).forEach(k => { if (atCounts.hasOwnProperty(k)) atCounts[k] = 0; });
+      autoSampleRunning = false;   // stops any running autoSampleAllTables() loop
+      autoSampleAborted.clear();
+      Object.keys(rcTableCache).forEach(k => delete rcTableCache[k]);
+      atUpdatePills();
+      document.getElementById('at-tbody').innerHTML = '';
+      document.getElementById('at-table-wrap').style.display = 'none';
+      document.getElementById('at-placeholder').style.display = '';
+
+      const skipSync = document.getElementById('at-skip-sync').checked;
+      const selectedTables = atSelected.size > 0 ? [...atSelected] : null;
+      const resp = await fetch('/api/all-tables/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          db: activeDatabase,
+          skip_sync: skipSync,
+          ...(selectedTables ? { tables: selectedTables } : {}),
+          today_tables: [...atTodayOverride],
+          ...atYearWindow()
+        })
+      });
+      if (!resp.ok) { alert('Failed to start'); btn.disabled = false; btn.classList.remove('running'); return; }
+
+      if (atEs) atEs.close();
+      atEs = new EventSource('/api/all-tables/stream');
+      atEs.onmessage = e => {
+        try { atHandleEvent(JSON.parse(e.data)); }
+        catch (ex) { console.warn('AT SSE parse error', ex, e.data); }
+      };
+      atEs.onerror = () => { atEs.close(); atEs = null; }
+    }
+
+
+    // ─── Full Comparison View (All rows: match + mismatch + missing + extra) ─────
+    const atFcExpandedRows = new Set();
+
+    const atFcState = {
+      table: null,
+      currentPage: 0,
+      pageSize: 50,
+      filterType: 'all',
+      loading: false,
+      currentSamples: [],
+      totalRecords: 0,
+      totalPages: 0,
+      typeCounts: { all: 0, match: 0, mismatch: 0, missing: 0, extra: 0 },
+    };
+
+    function atBuildFullCompareHtml(table) {
+      return `
+    <div class="rc-panel" id="at-fc-panel" style="margin-top:20px;">
+      <div class="rc-panel-header" style="border-bottom:1px solid var(--border); padding-bottom:12px;">
+        <div class="rc-panel-title" style="display:flex; align-items:center; gap:8px;">
+          <span>🔬 Full Comparison View (ทุก row — ถูกและผิด)</span>
+          <span id="at-fc-total-badge" style="font-size:10px; color:var(--muted);"></span>
+        </div>
+      </div>
+      <div class="rc-filter-bar" style="padding:10px 20px;">
+        <button class="rc-filter-btn active" id="at-fc-btn-all"      onclick="atFcSetFilter('all')">ALL</button>
+        <button class="rc-filter-btn"        id="at-fc-btn-match"    onclick="atFcSetFilter('match')">MATCH</button>
+        <button class="rc-filter-btn"        id="at-fc-btn-mismatch" onclick="atFcSetFilter('mismatch')">MISMATCH</button>
+        <button class="rc-filter-btn"        id="at-fc-btn-missing"  onclick="atFcSetFilter('missing')">MISSING</button>
+        <button class="rc-filter-btn"        id="at-fc-btn-extra"    onclick="atFcSetFilter('extra')">EXTRA</button>
+        <span style="margin-left:auto; font-size:11px; color:var(--muted);" id="at-fc-range-text">แสดง 0-0 จาก 0 แถว</span>
+      </div>
+      <div class="rc-body" id="at-fc-body" style="border-bottom:1px solid var(--border);">
+        <div class="rc-empty">
+          <div class="rc-spinner" style="display:inline-block; width:16px; height:16px;"></div>
+          <div style="margin-top:8px;">กำลังโหลดข้อมูลการเปรียบเทียบ...</div>
+        </div>
+      </div>
+      <div class="rc-pagination" id="at-fc-pagination" style="margin-top:12px; display:flex; align-items:center; justify-content:center; gap:8px; padding-bottom:14px;"></div>
+    </div>
+  `;
+    }
+
+    function atFcInit(tableName) {
+      atFcState.table = tableName;
+      atFcState.currentPage = 0;
+      atFcState.filterType = 'all';
+      atFcState.loading = false;
+      atFcState.currentSamples = [];
+      atFcState.totalRecords = 0;
+      atFcState.totalPages = 0;
+      atFcState.typeCounts = { all: 0, match: 0, mismatch: 0, missing: 0, extra: 0 };
+      atFcExpandedRows.clear();
+      atFcFetchPage(0);
+    }
+
+    function atFcSetFilter(type) {
+      atFcState.filterType = type;
+      atFcExpandedRows.clear();
+      ['all', 'match', 'mismatch', 'missing', 'extra'].forEach(id => {
+        const el = document.getElementById(`at-fc-btn-${id}`);
+        if (el) el.classList.toggle('active', id === type);
+      });
+      atFcFetchPage(0);
+    }
+
+    function atFcGoPage(delta) {
+      const next = atFcState.currentPage + delta;
+      if (next < 0 || next >= atFcState.totalPages) return;
+      atFcExpandedRows.clear();
+      atFcFetchPage(next);
+    }
+
+    function atFcToggleRow(idx) {
+      if (atFcExpandedRows.has(idx)) { atFcExpandedRows.delete(idx); }
+      else { atFcExpandedRows.add(idx); }
+      const c = document.getElementById(`at-fc-fields-${idx}`);
+      const a = document.getElementById(`at-fc-arrow-${idx}`);
+      if (c) c.classList.toggle('open');
+      if (a) a.classList.toggle('open');
+    }
+
+    async function atFcFetchPage(page) {
+      const table = atFcState.table;
+      if (!table || atFcState.loading) return;
+      atFcState.loading = true;
+
+      const body = document.getElementById('at-fc-body');
+      if (body) body.innerHTML = `
+    <div class="rc-empty">
+      <div class="rc-spinner" style="display:inline-block; width:16px; height:16px;"></div>
+      <div style="margin-top:8px;">กำลังโหลด...</div>
+    </div>`;
+
+      try {
+        const resp = await fetch('/api/reports/full-compare/paged', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table, page, page_size: atFcState.pageSize, filter_type: atFcState.filterType }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        atFcState.currentPage = result.page;
+        atFcState.currentSamples = result.samples;
+        atFcState.totalRecords = result.total;
+        atFcState.totalPages = result.total_pages;
+        atFcState.typeCounts = result.type_counts || atFcState.typeCounts;
+      } catch (e) {
+        console.error('atFcFetchPage error:', e);
+        if (body) body.innerHTML = `<div class="rc-empty" style="color:var(--fail);">โหลดไม่สำเร็จ: ${e.message}</div>`;
+        atFcState.loading = false;
+        return;
+      }
+
+      atFcState.loading = false;
+      atFcRender();
+    }
+
+    function atFcRender() {
+      const body = document.getElementById('at-fc-body');
+      const pagination = document.getElementById('at-fc-pagination');
+      const rangeText = document.getElementById('at-fc-range-text');
+      if (!body) return;
+
+      const pageRows = atFcState.currentSamples;
+      const pageStart = atFcState.currentPage * atFcState.pageSize;
+      const total = atFcState.totalRecords;
+      const pageEnd = pageStart + pageRows.length;
+
+      if (rangeText) {
+        rangeText.textContent = total === 0
+          ? 'แสดง 0 จาก 0 แถว'
+          : `แสดง ${pageStart + 1}–${pageEnd} จาก ${total.toLocaleString()} แถว`;
+      }
+
+      if (pageRows.length === 0) {
+        body.innerHTML = `<div class="rc-empty"><div>ไม่มีข้อมูลในหมวดหมู่นี้</div></div>`;
+        if (pagination) pagination.innerHTML = '';
+      } else {
+        body.innerHTML = pageRows.map((s, idx) => {
+          const globalIdx = pageStart + idx;
+          const isExpanded = atFcExpandedRows.has(globalIdx);
+          const pkStr = s.pk
+            ? Object.entries(s.pk).map(([k, v]) => `<span style="color:var(--muted)">${k}:</span> ${v}`).join(', ')
+            : '—';
+
+          const diffCount = s.fields ? s.fields.filter(f => !f.match).length : 0;
+          const allCount = s.fields ? s.fields.length : 0;
+          const badgeLabel = s.type === 'match' ? `✓ MATCH`
+            : s.type === 'mismatch' ? `✗ ${diffCount} DIFF`
+              : s.type === 'missing' ? '⚠ MISSING'
+                : '➕ EXTRA';
+          const badgeCls = s.type === 'match' ? 'pass' : s.type;
+
+          let fieldsHtml = '';
+          if (s.type === 'match' && allCount === 0) {
+            fieldsHtml = `
+          <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="at-fc-fields-${globalIdx}">
+            <div style="padding:12px 16px; color:var(--muted); font-size:12px;">✓ ทุก column ตรงกัน</div>
+          </div>`;
+          } else if (s.fields && s.fields.length > 0) {
+            fieldsHtml = `
+          <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="at-fc-fields-${globalIdx}">
+            <table class="rc-fields-table">
+              <thead><tr>
+                <th style="width:30px">✓</th><th>Column</th>
+                <th>Source</th><th>Target</th>
+              </tr></thead>
+              <tbody>
+                ${s.fields.map(f => {
+              const cls = f.match ? '' : 'field-diff';
+              const icon = f.match ? '<span class="field-match-icon ok">✓</span>' : '<span class="field-match-icon diff">✗</span>';
+              const srcVal = f.source != null ? sqlEsc(String(f.source)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+              const tgtVal = f.target != null ? sqlEsc(String(f.target)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+              return `<tr class="${cls}"><td>${icon}</td><td class="field-col-name">${sqlEsc(f.column)}</td><td class="field-src">${srcVal}</td><td class="field-tgt">${tgtVal}</td></tr>`;
+            }).join('')}
+              </tbody>
+            </table>
+          </div>`;
+          }
+
+          return `
+        <div class="rc-row-card ${s.type === 'match' ? '' : s.type}">
+          <div class="rc-row-header" onclick="atFcToggleRow(${globalIdx})" style="cursor:pointer;">
+            <span class="rc-row-num">#${globalIdx + 1}</span>
+            <span class="rc-row-pk">${pkStr}</span>
+            <span class="rc-row-badge ${badgeCls}">${badgeLabel}</span>
+            <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="at-fc-arrow-${globalIdx}" >▶</span>
+          </div>
+          ${fieldsHtml}
+        </div>`;
+        }).join('');
+
+        if (pagination) {
+          const { currentPage, totalPages, pageSize } = atFcState;
+          pagination.innerHTML = `
+        <button class="rc-page-btn" onclick="atFcGoPage(-1)" ${currentPage <= 0 ? 'disabled' : ''}>◀ Prev ${pageSize}</button>
+        <span class="rc-page-info">Page ${currentPage + 1} / ${totalPages.toLocaleString()}</span>
+        <button class="rc-page-btn" onclick="atFcGoPage(1)" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next ${pageSize} ▶</button>
+      `;
+        }
+      }
+
+      // Update total badge and filter button counts
+      const tc = atFcState.typeCounts;
+      const totalBadge = document.getElementById('at-fc-total-badge');
+      if (totalBadge) {
+        totalBadge.textContent = total > 0
+          ? `รวม ${tc.all.toLocaleString()} แถว (match ${tc.match?.toLocaleString() || 0} / mismatch ${tc.mismatch?.toLocaleString() || 0} / missing ${tc.missing?.toLocaleString() || 0} / extra ${tc.extra?.toLocaleString() || 0})`
+          : '';
+      }
+      const fcCounts = { all: tc.all, match: tc.match, mismatch: tc.mismatch, missing: tc.missing, extra: tc.extra };
+      Object.entries(fcCounts).forEach(([type, count]) => {
+        const el = document.getElementById(`at-fc-btn-${type}`);
+        if (el) el.textContent = count > 0 ? `${type.toUpperCase()} (${(count || 0).toLocaleString()})` : type.toUpperCase();
+      });
+    }
+
+    // ─── All Mismatches Explorer (Report UI & Pagination) ────────────────
+    const atExpExpandedSamples = new Set();
+
+    function atExpToggleSampleRow(idx) {
+      if (atExpExpandedSamples.has(idx)) {
+        atExpExpandedSamples.delete(idx);
+      } else {
+        atExpExpandedSamples.add(idx);
+      }
+      const container = document.getElementById(`at-exp-fields-${idx}`);
+      const arrow = document.getElementById(`at-exp-arrow-${idx}`);
+      if (container) container.classList.toggle('open');
+      if (arrow) arrow.classList.toggle('open');
+    }
+
+    const atExpState = {
+      table: null,
+      currentPage: 0,
+      pageSize: 50,
+      filterType: 'all',
+      loading: false,
+      currentSamples: [],
+      totalRecords: 0,
+      totalPages: 0,
+      typeCounts: { all: 0, mismatch: 0, missing: 0, extra: 0 },
+    };
+
+    function atBuildMismatchesExplorerHtml(table, d) {
+      const cd = d.checks_data || {};
+      const sync = cd.full_sync || {};
+      const syncStatus = sync.status || 'SKIP';
+
+      if (!syncStatus || syncStatus === 'SKIP') {
+        return ''; // Only show explorer if full sync ran (PASS or FAIL)
+      }
+
+      return `
+    <div class="rc-panel" id="at-mismatches-explorer-panel" style="margin-top:20px;">
+      <div class="rc-panel-header" style="border-bottom:1px solid var(--border); padding-bottom:12px;">
+        <div class="rc-panel-title" style="display:flex; align-items:center; gap:8px;">
+          <span>📊 รายงานข้อผิดพลาดทั้งหมด (All Discrepancies Explorer)</span>
+          <span class="rc-row-badge fail" style="font-size:10px; font-weight:700;">100% COVERAGE</span>
+          <span id="at-exp-total-badge" style="font-size:10px; color:var(--muted);"></span>
+        </div>
+        <div class="rc-controls" style="display:flex; gap:6px;">
+          <button onclick="atExpDownloadCsv('${table}')" class="rc-btn" style="background:rgba(248,81,73,0.1); border-color:var(--fail); color:var(--fail); font-size:11px; padding:6px 12px; border-radius:4px;">
+            <span style="margin-right:4px;">📊</span>Excel (.xlsx)
+          </button>
+          <button onclick="atExpDownloadRawCsv('${table}')" class="rc-btn" style="background:rgba(139,148,158,0.1); border-color:var(--muted); color:var(--muted); font-size:11px; padding:6px 12px; border-radius:4px;">
+            <span style="margin-right:4px;">📄</span>CSV (raw)
+          </button>
+        </div>
+      </div>
+      
+      <div class="rc-filter-bar" style="padding:10px 20px;">
+        <button class="rc-filter-btn active" id="at-exp-btn-all" onclick="atExpSetFilter('all')">ALL</button>
+        <button class="rc-filter-btn" id="at-exp-btn-mismatch" onclick="atExpSetFilter('mismatch')">MISMATCH</button>
+        <button class="rc-filter-btn" id="at-exp-btn-missing" onclick="atExpSetFilter('missing')">MISSING</button>
+        <button class="rc-filter-btn" id="at-exp-btn-extra" onclick="atExpSetFilter('extra')">EXTRA</button>
+        <span style="margin-left:auto; font-size:11px; color:var(--muted);" id="at-exp-range-text">แสดง 0-0 จาก 0 แถว</span>
+      </div>
+      
+      <div class="rc-body" id="at-exp-body" style="max-height:450px; overflow-y:auto; border-bottom:1px solid var(--border);">
+        <div class="rc-empty">
+          <div class="rc-spinner" style="display:inline-block; width:16px; height:16px;"></div>
+          <div style="margin-top:8px;">กำลังโหลดรายงานความต่าง...</div>
+        </div>
+      </div>
+      
+      <div class="rc-pagination" id="at-exp-pagination" style="margin-top:12px; display:flex; align-items:center; justify-content:center; gap:8px; padding-bottom:14px;">
+        <!-- Pagination UI -->
+      </div>
+    </div>
+  `;
+    }
+
+    function atExpInit(tableName) {
+      atExpState.table = tableName;
+      atExpState.currentPage = 0;
+      atExpState.filterType = 'all';
+      atExpState.currentSamples = [];
+      atExpState.totalRecords = 0;
+      atExpState.totalPages = 0;
+      atExpState.typeCounts = { all: 0, mismatch: 0, missing: 0, extra: 0 };
+      atExpExpandedSamples.clear();
+      atExpFetchPage(0);
+    }
+
+    function atExpSetFilter(type) {
+      atExpState.filterType = type;
+      atExpExpandedSamples.clear();
+      ['all', 'mismatch', 'missing', 'extra'].forEach(id => {
+        const el = document.getElementById(`at-exp-btn-${id}`);
+        if (el) el.classList.toggle('active', id === type);
+      });
+      atExpFetchPage(0);
+    }
+
+    function atExpGoPage(delta) {
+      const next = atExpState.currentPage + delta;
+      if (next < 0 || next >= atExpState.totalPages) return;
+      atExpExpandedSamples.clear();
+      atExpFetchPage(next);
+    }
+
+    async function atExpFetchPage(page) {
+      const table = atExpState.table;
+      if (!table || atExpState.loading) return;
+      atExpState.loading = true;
+
+      const body = document.getElementById('at-exp-body');
+      if (body) body.innerHTML = `
+    <div class="rc-empty">
+      <div class="rc-spinner" style="display:inline-block; width:16px; height:16px;"></div>
+      <div style="margin-top:8px;">กำลังโหลด...</div>
+    </div>`;
+
+      try {
+        const resp = await fetch('/api/reports/discrepancies/paged', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            table,
+            page,
+            page_size: atExpState.pageSize,
+            filter_type: atExpState.filterType,
+          }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        atExpState.currentPage = result.page;
+        atExpState.currentSamples = result.samples;
+        atExpState.totalRecords = result.total;
+        atExpState.totalPages = result.total_pages;
+        atExpState.typeCounts = result.type_counts || atExpState.typeCounts;
+      } catch (e) {
+        console.error('atExpFetchPage error:', e);
+        if (body) body.innerHTML = `<div class="rc-empty" style="color:var(--fail);">โหลดข้อมูลไม่สำเร็จ: ${e.message}</div>`;
+        atExpState.loading = false;
+        return;
+      }
+
+      atExpState.loading = false;
+      atExpRender();
+    }
+
+    function atExpRender() {
+      const body = document.getElementById('at-exp-body');
+      const pagination = document.getElementById('at-exp-pagination');
+      const rangeText = document.getElementById('at-exp-range-text');
+      if (!body) return;
+
+      const pageRows = atExpState.currentSamples;
+      const pageStart = atExpState.currentPage * atExpState.pageSize;
+      const total = atExpState.totalRecords;
+      const pageEnd = pageStart + pageRows.length;
+
+      if (rangeText) {
+        rangeText.textContent = total === 0
+          ? 'แสดง 0 จาก 0 แถว'
+          : `แสดง ${pageStart + 1}–${pageEnd} จาก ${total.toLocaleString()} แถว`;
+      }
+
+      if (pageRows.length === 0) {
+        body.innerHTML = `<div class="rc-empty"><div>✅ ไม่มีข้อมูลความต่างในหมวดหมู่นี้</div></div>`;
+        if (pagination) pagination.innerHTML = '';
+      } else {
+        body.innerHTML = pageRows.map((s, idx) => {
+          const globalIdx = pageStart + idx;
+          const isExpanded = atExpExpandedSamples.has(globalIdx);
+          const pkStr = s.pk
+            ? Object.entries(s.pk).map(([k, v]) => `<span style="color:var(--muted)">${k}:</span> ${v}`).join(', ')
+            : '—';
+          const diffCount = s.fields ? s.fields.filter(f => !f.match).length : 0;
+          const badgeLabel = s.type === 'mismatch' ? `✗ ${diffCount} DIFF`
+            : s.type === 'missing' ? '⚠ MISSING'
+              : '➕ EXTRA';
+          let fieldsHtml = '';
+          if (s.fields && s.fields.length > 0) {
+            fieldsHtml = `
+          <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="at-exp-fields-${globalIdx}">
+            <table class="rc-fields-table">
+              <thead><tr>
+                <th style="width:30px">✓</th><th>Column</th>
+                <th>Source</th><th>Target</th>
+              </tr></thead>
+              <tbody>
+                ${s.fields.map(f => {
+              const cls = f.match ? '' : 'field-diff';
+              const icon = f.match ? '<span class="field-match-icon ok">✓</span>' : '<span class="field-match-icon diff">✗</span>';
+              const srcVal = f.source != null ? sqlEsc(String(f.source)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+              const tgtVal = f.target != null ? sqlEsc(String(f.target)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+              return `<tr class="${cls}"><td>${icon}</td><td class="field-col-name">${sqlEsc(f.column)}</td><td class="field-src">${srcVal}</td><td class="field-tgt">${tgtVal}</td></tr>`;
+            }).join('')}
+              </tbody>
+            </table>
+          </div>`;
+          }
+          return `
+        <div class="rc-row-card ${s.type}">
+          <div class="rc-row-header" onclick="atExpToggleSampleRow(${globalIdx})" style="cursor:pointer;">
+            <span class="rc-row-num">#${globalIdx + 1}</span>
+            <span class="rc-row-pk">${pkStr}</span>
+            <span class="rc-row-badge ${s.type}">${badgeLabel}</span>
+            <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="at-exp-arrow-${globalIdx}">▶</span>
+          </div>
+          ${fieldsHtml}
+        </div>`;
+        }).join('');
+
+        if (pagination) {
+          const { currentPage, totalPages, pageSize } = atExpState;
+          pagination.innerHTML = `
+        <button class="rc-page-btn" onclick="atExpGoPage(-1)" ${currentPage <= 0 ? 'disabled' : ''}>◀ Prev ${pageSize}</button>
+        <span class="rc-page-info">Page ${currentPage + 1} / ${totalPages.toLocaleString()}</span>
+        <button class="rc-page-btn" onclick="atExpGoPage(1)" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next ${pageSize} ▶</button>
+      `;
+        }
+      }
+
+      // Update total badge
+      const totalBadge = document.getElementById('at-exp-total-badge');
+      if (totalBadge) {
+        const tc = atExpState.typeCounts;
+        totalBadge.textContent = total > 0
+          ? `รวม ${tc.all.toLocaleString()} รายการ (mismatch ${tc.mismatch.toLocaleString()} / missing ${tc.missing.toLocaleString()} / extra ${tc.extra.toLocaleString()})`
+          : '';
+      }
+
+      // Update filter button counts
+      const tc = atExpState.typeCounts;
+      const filterCounts = { all: tc.all, mismatch: tc.mismatch, missing: tc.missing, extra: tc.extra };
+      Object.entries(filterCounts).forEach(([type, count]) => {
+        const el = document.getElementById(`at-exp-btn-${type}`);
+        if (el) {
+          const label = type.toUpperCase();
+          el.textContent = count > 0 ? `${label} (${count.toLocaleString()})` : label;
+        }
+      });
+    }
+
+    function atExpDownloadCsv(table) {
+      const a = document.createElement('a');
+      a.href = `/api/reports/download-excel/${table}`;
+      a.download = `${table}_discrepancies.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
+
+    function atExpDownloadRawCsv(table) {
+      const a = document.createElement('a');
+      a.href = `/static/reports/${table}_mismatches.csv`;
+      a.download = `${table}_mismatches.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
+
+    function sqlEsc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Initialize connection settings and database dropdown on DOM load
+    function _syncOverviewHeight() {
+      const ov = document.getElementById('overview');
+      if (ov) document.documentElement.style.setProperty('--overview-h', ov.offsetHeight + 'px');
+    }
+    window.addEventListener('resize', _syncOverviewHeight);
+    new ResizeObserver(_syncOverviewHeight).observe(document.getElementById('overview') || document.body);
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      _syncOverviewHeight();
+      await atInitSettings();
+      atInitYearWindow();
+      atReplayIfAvailable();
+      atLoadTableList();
+    });
+
+    function _setDisabled(el, disabled) {
+      if (!el) return;
+      el.disabled = disabled;
+      el.style.opacity = disabled ? '0.4' : '1';
+      if (disabled) el.value = '';
+    }
+
+    function atOnYearChange(side, val) {
+      const monthEl = document.getElementById(`at-month-${side}`);
+      const dayEl   = document.getElementById(`at-day-${side}`);
+      if (!val) {
+        _setDisabled(monthEl, true);
+        _setDisabled(dayEl, true);
+      } else {
+        _setDisabled(monthEl, false);
+        _setDisabled(dayEl, true); // day still needs month
+      }
+    }
+
+    function atOnMonthChange(side, val) {
+      const dayEl = document.getElementById(`at-day-${side}`);
+      _setDisabled(dayEl, !val);
+    }
+
+    // Populate year/month dropdowns.
+    async function atInitYearWindow() {
+      const fromEl  = document.getElementById('at-year-from');
+      const toEl    = document.getElementById('at-year-to');
+      const mFromEl = document.getElementById('at-month-from');
+      const mToEl   = document.getElementById('at-month-to');
+      if (!fromEl || !toEl) return;
+      let defLabelFrom = 'Default';
+      const now = new Date().getFullYear();
+      try {
+        const cfg = await fetch('/api/config').then(r => r.json());
+        const n = parseInt((cfg.tuning || {}).data_window_years, 10) || 0;
+        defLabelFrom = n > 0 ? `Default (${now - n})` : 'Default (all)';
+      } catch (e) { /* non-fatal */ }
+      const years = [];
+      for (let y = now; y >= 2000; y--) years.push(y);
+      fromEl.innerHTML = `<option value="">${defLabelFrom}</option>` +
+        years.map(y => `<option value="${y}">${y}</option>`).join('');
+      toEl.innerHTML = `<option value="">Default (${now})</option>` +
+        years.map(y => `<option value="${y}">${y}</option>`).join('');
+      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const monthOpts = `<option value="">-</option>` +
+        MONTHS.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+      if (mFromEl) mFromEl.innerHTML = monthOpts;
+      if (mToEl)   mToEl.innerHTML   = monthOpts;
+      const dayOpts = `<option value="">-</option>` +
+        Array.from({length: 31}, (_, i) => `<option value="${i+1}">${String(i+1).padStart(2,'0')}</option>`).join('');
+      const dFromEl = document.getElementById('at-day-from');
+      const dToEl   = document.getElementById('at-day-to');
+      if (dFromEl) dFromEl.innerHTML = dayOpts;
+      if (dToEl)   dToEl.innerHTML   = dayOpts;
+    }
+
+    async function atReplayIfAvailable() {
+      try {
+        const status = await fetch('/api/all-tables/status').then(r => r.json());
+        if (status.running) {
+          await fetch('/api/all-tables/stop', { method: 'POST' }).catch(() => { });
+        }
+      } catch (e) {
+        // server not ready yet, ignore
+      }
+    }
+
+    // ─── Random Field-by-Field Comparison ──────────────────────────────────────────
+    // Per-table cache: persists random compare data until page refresh
+    const rcTableCache = {};  // tableName -> { batches, currentBatch, currentPage, tableSeed, nextOffset, filter }
+
+    const rcState = {
+      // batches[i] = { seed, sample_offset, table, db, rows, matches, mismatches, total_compared, pk_cols, columns }
+      currentTable: null,
+      batches: [],
+      currentBatch: -1,
+      currentPage: 0,
+      pageSize: 50,
+      tableSeed: null,   // fixed seed for this table session — ensures ORDER BY RAND(seed) is consistent
+      nextOffset: 0,     // advances by sample_size each call — guarantees no repeated rows
+      loading: false,
+      filter: 'all',     // 'all' | 'mismatch'
+      expandedRows: new Set(),
+    };
+
+    function rcSaveForTable() {
+      if (!rcState.currentTable) return;
+      rcTableCache[rcState.currentTable] = {
+        batches: rcState.batches,
+        currentBatch: rcState.currentBatch,
+        currentPage: rcState.currentPage,
+        tableSeed: rcState.tableSeed,
+        nextOffset: rcState.nextOffset,
+        filter: rcState.filter,
+      };
+    }
+
+    function rcRestoreForTable(table) {
+      rcSaveForTable();
+      rcState.currentTable = table;
+      rcState.expandedRows.clear();
+
+      const cached = rcTableCache[table];
+      if (cached) {
+        rcState.batches = cached.batches;
+        rcState.currentBatch = cached.currentBatch;
+        rcState.currentPage = cached.currentPage;
+        rcState.tableSeed = cached.tableSeed;
+        rcState.nextOffset = cached.nextOffset;
+        rcState.filter = cached.filter;
+      } else {
+        rcState.batches = [];
+        rcState.currentBatch = -1;
+        rcState.currentPage = 0;
+        rcState.tableSeed = null;
+        rcState.nextOffset = 0;
+        rcState.filter = 'all';
+      }
+    }
+
+    function rcGetFilteredRows() {
+      if (rcState.currentBatch < 0 || rcState.currentBatch >= rcState.batches.length) return [];
+      const batch = rcState.batches[rcState.currentBatch];
+      const filterVal = rcState.filter || 'all';
+      if (filterVal === 'all') {
+        return batch.rows;
+      }
+      if (filterVal === 'diff') {
+        return batch.rows.filter(r => r.status !== 'match');
+      }
+      return batch.rows.filter(r => r.status === filterVal);
+    }
+
+    async function rcRunRandomCompare(tableName) {
+      if (rcState.loading) return;
+      if (document.getElementById('at-run-btn')?.disabled) {
+        alert('Validation is running — wait for it to finish before sampling.');
+        return;
+      }
+      const btn = document.getElementById('rc-sample-btn');
+      if (btn) { btn.disabled = true; btn.classList.add('loading'); }
+      rcState.loading = true;
+
+      try {
+        const resp = await fetch('/api/random-compare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            table: tableName,
+            db: activeDatabase,
+            seed: rcState.tableSeed,          // null on first call → backend generates new seed
+            sample_offset: rcState.nextOffset,
+            sample_size: 1000,
+            ...atYearWindow(),
+          })
+        });
+        const result = await resp.json();
+        if (!resp.ok) {
+          alert(result.error || 'Failed to run random compare');
+          return;
+        }
+
+        rcState.tableSeed = result.seed;          // lock seed for this table session
+        rcState.nextOffset = result.next_offset;  // advance window for next call
+        rcState.batches.push(result);
+        rcState.currentBatch = rcState.batches.length - 1;
+        rcState.currentPage = 0;
+        rcState.expandedRows.clear();
+        rcSaveForTable();  // persist to cache
+        rcRender();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      } finally {
+        rcState.loading = false;
+        if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+      }
+    }
+
+    function rcGoBatch(delta) {
+      const next = rcState.currentBatch + delta;
+      if (next >= 0 && next < rcState.batches.length) {
+        rcState.currentBatch = next;
+        rcState.currentPage = 0;
+        rcState.expandedRows.clear();
+        rcRender();
+      }
+    }
+
+    function rcGoPage(delta) {
+      const filtered = rcGetFilteredRows();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / rcState.pageSize));
+      const next = rcState.currentPage + delta;
+      if (next >= 0 && next < totalPages) {
+        rcState.currentPage = next;
+        rcState.expandedRows.clear();
+        rcRender();
+      }
+    }
+
+    function rcSetFilter(f) {
+      rcState.filter = f;
+      rcState.currentPage = 0;
+      rcState.expandedRows.clear();
+      rcRender();
+    }
+
+    function rcToggleRow(idx) {
+      if (rcState.expandedRows.has(idx)) {
+        rcState.expandedRows.delete(idx);
+      } else {
+        rcState.expandedRows.add(idx);
+      }
+      // Toggle just the DOM elements for this row
+      const container = document.getElementById(`rc-fields-${idx}`);
+      const arrow = document.getElementById(`rc-arrow-${idx}`);
+      if (container) {
+        container.classList.toggle('open');
+      }
+      if (arrow) {
+        arrow.classList.toggle('open');
+      }
+    }
+
+    function rcRender() {
+      const panel = document.getElementById('rc-panel');
+      if (!panel) return;
+
+      if (rcState.batches.length === 0) {
+        panel.querySelector('.rc-summary-bar')?.remove();
+        const body = panel.querySelector('.rc-body');
+        if (body) {
+          body.innerHTML = `
+        <div class="rc-empty">
+          <div class="rc-empty-icon">🎲</div>
+          <div>กดปุ่ม <strong>"🔀 สุ่ม 1,000 แถว"</strong> เพื่อสุ่มเปรียบเทียบข้อมูล</div>
+          <div style="margin-top:4px; font-size:11px;">จะสุ่มเอาแถวจาก Source มาเทียบกับ Target ทีละ field</div>
+        </div>`;
+        }
+        return;
+      }
+
+      const batch = rcState.batches[rcState.currentBatch];
+      const filtered = rcGetFilteredRows();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / rcState.pageSize));
+      const pageStart = rcState.currentPage * rcState.pageSize;
+      const pageEnd = Math.min(pageStart + rcState.pageSize, filtered.length);
+      const pageRows = filtered.slice(pageStart, pageEnd);
+
+      // Update batch nav
+      const batchInfo = panel.querySelector('.rc-batch-info');
+      if (batchInfo) batchInfo.textContent = `Batch ${rcState.currentBatch + 1} / ${rcState.batches.length}`;
+      const prevBatchBtn = panel.querySelector('.rc-batch-prev');
+      const nextBatchBtn = panel.querySelector('.rc-batch-next');
+      if (prevBatchBtn) prevBatchBtn.disabled = rcState.currentBatch <= 0;
+      if (nextBatchBtn) nextBatchBtn.disabled = rcState.currentBatch >= rcState.batches.length - 1;
+
+      // Summary bar
+      let summaryEl = panel.querySelector('.rc-summary-bar');
+      if (!summaryEl) {
+        summaryEl = document.createElement('div');
+        summaryEl.className = 'rc-summary-bar';
+        const body = panel.querySelector('.rc-body');
+        panel.insertBefore(summaryEl, body);
+      }
+      summaryEl.innerHTML = `
+    <div class="rc-stat"><span class="rc-stat-val total">${batch.total_compared.toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+    <div class="rc-stat"><span class="rc-stat-val pass">${batch.matches.toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
+    <div class="rc-stat"><span class="rc-stat-val fail">${batch.mismatches.toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
+    <div class="rc-stat"><span class="rc-stat-val warn">${(batch.missing || 0).toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
+    <div class="rc-stat"><span class="rc-stat-val purple">${(batch.extra || 0).toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
+    <div style="margin-left:auto; font-size:11px; color:var(--muted);">Seed: <strong style="color:var(--purple)">${batch.seed}</strong> &nbsp;Offset: <strong style="color:var(--purple)">${batch.sample_offset}</strong></div>
+  `;
+
+      // Filter bar
+      let filterEl = panel.querySelector('.rc-filter-bar');
+      if (!filterEl) {
+        filterEl = document.createElement('div');
+        filterEl.className = 'rc-filter-bar';
+        const body = panel.querySelector('.rc-body');
+        panel.insertBefore(filterEl, body);
+      }
+      const currentFilter = rcState.filter || 'all';
+      filterEl.innerHTML = `
+    <button class="rc-filter-btn ${currentFilter === 'all' ? 'active' : ''}" onclick="rcSetFilter('all')">ALL (${batch.total_compared})</button>
+    <button class="rc-filter-btn ${currentFilter === 'match' ? 'active' : ''}" onclick="rcSetFilter('match')">MATCH (${batch.matches})</button>
+    <button class="rc-filter-btn ${currentFilter === 'mismatch' ? 'active' : ''}" onclick="rcSetFilter('mismatch')">MISMATCH (${batch.mismatches})</button>
+    <button class="rc-filter-btn ${currentFilter === 'missing' ? 'active' : ''}" onclick="rcSetFilter('missing')">MISSING (${batch.missing || 0})</button>
+    <button class="rc-filter-btn ${currentFilter === 'extra' ? 'active' : ''}" onclick="rcSetFilter('extra')">EXTRA (${batch.extra || 0})</button>
+    <span style="margin-left:auto; font-size:11px; color:var(--muted);">แสดง ${pageStart + 1}–${pageEnd} จาก ${filtered.length} แถว</span>
+  `;
+
+      // Body rows
+      const body = panel.querySelector('.rc-body');
+      if (pageRows.length === 0) {
+        body.innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">✅</div><div>ไม่มีข้อมูลในหมวดหมู่นี้</div></div>`;
+      } else {
+        const html = pageRows.map((row, pi) => {
+          const globalIdx = pageStart + pi;
+          const isExpanded = rcState.expandedRows.has(globalIdx);
+          const pkStr = Object.entries(row.pk).map(([k, v]) =>
+            `<span style="color:var(--muted)">${k}:</span> ${v}`
+          ).join(', ');
+
+          const diffCount = row.fields ? row.fields.filter(f => !f.match).length : 0;
+          const badgeLabel = row.status === 'match' ? '✓ MATCH' :
+            row.status === 'missing' ? '⚠ MISSING' :
+              row.status === 'extra' ? '➕ EXTRA' :
+                `✗ ${diffCount} DIFF`;
+
+          let fieldsHtml = '';
+          if (row.fields && row.fields.length > 0) {
+            fieldsHtml = `
+          <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="rc-fields-${globalIdx}">
+            <table class="rc-fields-table">
+              <thead><tr>
+                <th style="width:30px">✓</th>
+                <th>Column</th>
+                <th>Source</th>
+                <th>Target</th>
+              </tr></thead>
+              <tbody>
+                ${row.fields.map(f => {
+              const cls = f.match ? '' : 'field-diff';
+              const icon = f.match
+                ? '<span class="field-match-icon ok">✓</span>'
+                : '<span class="field-match-icon diff">✗</span>';
+              const srcVal = f.source !== null ? f.source : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+              const tgtVal = f.target !== null ? f.target : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+              return `<tr class="${cls}">
+                    <td>${icon}</td>
+                    <td class="field-col-name">${f.column}</td>
+                    <td class="field-src">${srcVal}</td>
+                    <td class="field-tgt">${tgtVal}</td>
+                  </tr>`;
+            }).join('')}
+              </tbody>
+            </table>
+          </div>`;
+          }
+
+          return `
+        <div class="rc-row-card ${row.status}">
+          <div class="rc-row-header" onclick="rcToggleRow(${globalIdx})">
+            <span class="rc-row-num">#${globalIdx + 1}</span>
+            <span class="rc-row-pk">${pkStr}</span>
+            <span class="rc-row-badge ${row.status}">${badgeLabel}</span>
+            <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="rc-arrow-${globalIdx}">▶</span>
+          </div>
+          ${fieldsHtml}
+        </div>`;
+        }).join('');
+        body.innerHTML = html;
+      }
+
+      // Pagination
+      let pagEl = panel.querySelector('.rc-pagination');
+      if (!pagEl) {
+        pagEl = document.createElement('div');
+        pagEl.className = 'rc-pagination';
+        panel.appendChild(pagEl);
+      }
+      pagEl.innerHTML = `
+    <button class="rc-page-btn" onclick="rcGoPage(-1)" ${rcState.currentPage <= 0 ? 'disabled' : ''}>◀ Prev ${rcState.pageSize}</button>
+    <span class="rc-page-info">Page ${rcState.currentPage + 1} / ${totalPages}</span>
+    <button class="rc-page-btn" onclick="rcGoPage(1)" ${rcState.currentPage >= totalPages - 1 ? 'disabled' : ''}>Next ${rcState.pageSize} ▶</button>
+  `;
+    }
+
+    // ─── SQL Runner ──────────────────────────────────────────────────────────────
+    function sqlOpen(tableName) {
+      const overlay = document.getElementById('sql-overlay');
+      const drawer = document.getElementById('sql-drawer');
+      const title = document.getElementById('sql-drawer-title');
+      const input = document.getElementById('sql-input');
+
+      if (tableName) {
+        title.textContent = `🔍 SQL Runner — ${tableName}`;
+        if (!input.value.trim()) {
+          input.value = `SELECT * FROM \`${tableName}\` LIMIT 100`;
+        }
+      } else {
+        title.textContent = '🔍 SQL Runner';
+      }
+
+      document.getElementById('sql-results').innerHTML = '';
+      document.getElementById('sql-status').textContent = '';
+      overlay.classList.add('active');
+      drawer.classList.add('active');
+      setTimeout(() => input.focus(), 100);
+    }
+
+    function sqlClose() {
+      document.getElementById('sql-overlay').classList.remove('active');
+      document.getElementById('sql-drawer').classList.remove('active');
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        const drawer = document.getElementById('sql-drawer');
+        if (drawer && drawer.classList.contains('active')) sqlClose();
+      }
+      // Ctrl+Enter / Cmd+Enter inside textarea → run
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        const ta = document.getElementById('sql-input');
+        if (document.activeElement === ta) { e.preventDefault(); sqlRun(); }
+      }
+    });
+
+    async function sqlRun() {
+      const sql = (document.getElementById('sql-input').value || '').trim();
+      const target = document.getElementById('sql-target').value;
+      const limit = parseInt(document.getElementById('sql-limit').value, 10);
+      const btn = document.getElementById('sql-run-btn');
+      const status = document.getElementById('sql-status');
+      const resDiv = document.getElementById('sql-results');
+
+      if (!sql) { status.textContent = 'SQL is empty.'; return; }
+
+      btn.disabled = true;
+      document.getElementById('sql-btn-icon').textContent = '⌛';
+      document.getElementById('sql-btn-text').textContent = 'Running…';
+      status.textContent = '';
+      resDiv.innerHTML = '';
+
+      const t0 = Date.now();
+      try {
+        const resp = await fetch('/api/custom-query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql, db: activeDatabase, target, limit }),
+        });
+        const data = await resp.json();
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+
+        if (!resp.ok) {
+          resDiv.innerHTML = `<div class="sql-error-box">Error: ${sqlEsc(data.error || 'Unknown error')}</div>`;
+          return;
+        }
+
+        status.textContent = `Done in ${elapsed}s`;
+
+        const blocks = [];
+
+        if (data.source_error) {
+          blocks.push(`<div class="sql-result-block">
+        <div class="sql-result-header" style="color:var(--blue)">Source</div>
+        <div class="sql-error-box" style="margin:8px">Error: ${sqlEsc(data.source_error)}</div>
+      </div>`);
+        } else if (data.source) {
+          blocks.push(sqlResultBlock('Source', 'var(--blue)', data.source));
+        }
+
+        if (data.target_error) {
+          blocks.push(`<div class="sql-result-block">
+        <div class="sql-result-header" style="color:var(--purple)">Target</div>
+        <div class="sql-error-box" style="margin:8px">Error: ${sqlEsc(data.target_error)}</div>
+      </div>`);
+        } else if (data.target) {
+          blocks.push(sqlResultBlock('Target', 'var(--purple)', data.target));
+        }
+
+        resDiv.innerHTML = blocks.join('') || '<div style="color:var(--muted);font-size:12px;padding:8px">No results.</div>';
+      } catch (err) {
+        resDiv.innerHTML = `<div class="sql-error-box">Network error: ${sqlEsc(err.message)}</div>`;
+      } finally {
+        btn.disabled = false;
+        document.getElementById('sql-btn-icon').textContent = '▶';
+        document.getElementById('sql-btn-text').textContent = 'Run Query';
+      }
+    }
+
+    function sqlResultBlock(label, color, result) {
+      const cols = result.columns || [];
+      const rows = result.rows || [];
+      const count = result.count ?? rows.length;
+
+      let tableHtml = '';
+      if (cols.length === 0 && rows.length === 0) {
+        tableHtml = '<div style="padding:12px 16px; font-size:12px; color:var(--muted)">No rows returned.</div>';
+      } else {
+        const thead = cols.map(c => `<th>${sqlEsc(c)}</th>`).join('');
+        const tbody = rows.map(row =>
+          `<tr>${row.map(v =>
+            v === null
+              ? `<td><span class="sql-null">NULL</span></td>`
+              : `<td>${sqlEsc(String(v))}</td>`
+          ).join('')}</tr>`
+        ).join('');
+        tableHtml = `<div class="sql-scroll"><table class="sql-tbl"><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>`;
+      }
+
+      return `<div class="sql-result-block">
+    <div class="sql-result-header" style="color:${color}">
+      ${label}
+      <span style="color:var(--muted); font-weight:400">${count.toLocaleString()} row${count !== 1 ? 's' : ''}</span>
+      ${count >= 500 ? '<span style="color:var(--warn); font-size:10px">(limit reached — increase Limit to see more)</span>' : ''}
+    </div>
+    ${tableHtml}
+  </div>`;
+    }
+
+    function sqlEsc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ─── SQL Compare ────────────────────────────────────────────────────────────
+    const SC_REPORT = '_sql_compare';
+    const scState = {
+      mode: 'idle',   // 'idle' | 'streaming' | 'done'
+      streamMeta: null, streamProg: null,
+      pagedFilter: 'discrepancy', pagedPage: 0, pagedPageSize: 50, pagedData: null,
+      expandedRows: new Set(),
+    };
+    let _scEs = null;
+
+    let scTablesCache = [];
+
+    async function scPopulateTables() {
+      const hidden = document.getElementById('sc-table');
+      const prevVal = hidden.value;
+
+      let tables = Object.keys(atResults).sort();
+      if (!tables.length) tables = (atGetCachedTableList(activeDatabase) || []).slice().sort();
+      if (!tables.length) {
+        try {
+          const res = await fetch('/api/list-tables', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ db: activeDatabase }),
+          });
+          const data = await res.json();
+          tables = (data.tables || []).slice().sort();
+        } catch (e) {}
+      }
+
+      scTablesCache = tables;
+      if (prevVal && tables.includes(prevVal)) {
+        document.getElementById('sc-table-search').value = prevVal;
+      } else {
+        hidden.value = '';
+        document.getElementById('sc-table-search').value = '';
+      }
+
+      const lbl = document.getElementById('sc-db-label');
+      if (lbl) lbl.textContent = activeDatabase;
+    }
+
+    function scRenderTableList(filter) {
+      const list = document.getElementById('sc-table-list');
+      const q = (filter || '').trim().toLowerCase();
+      const matches = q ? scTablesCache.filter(t => t.toLowerCase().includes(q)) : scTablesCache;
+      if (!matches.length) {
+        list.innerHTML = '<div class="sql-combo-empty">ไม่พบ table</div>';
+      } else {
+        list.innerHTML = matches.map(t => `<div class="sql-combo-item" onmousedown="scSelectTable('${t.replace(/'/g, "\\'")}\')">${t}</div>`).join('');
+      }
+      list.classList.add('active');
+    }
+
+    function scShowTableList() {
+      scRenderTableList(document.getElementById('sc-table-search').value);
+    }
+
+    function scFilterTables() {
+      scRenderTableList(document.getElementById('sc-table-search').value);
+    }
+
+    function scSelectTable(table) {
+      document.getElementById('sc-table').value = table;
+      document.getElementById('sc-table-search').value = table;
+      document.getElementById('sc-table-list').classList.remove('active');
+      scLoadColumns(table);
+    }
+
+    document.addEventListener('click', (e) => {
+      const combo = document.querySelector('.sql-combo');
+      if (combo && !combo.contains(e.target)) {
+        document.getElementById('sc-table-list')?.classList.remove('active');
+      }
+    });
+
+    let scColumnsTable = null;
+    let scColumnsRows = [];
+
+    async function scLoadColumns(table) {
+      const box = document.getElementById('sc-columns');
+      if (!table) { box.style.display = 'none'; box.innerHTML = ''; scColumnsTable = null; scColumnsRows = []; return; }
+      scColumnsTable = table;
+      box.style.display = 'flex';
+      box.innerHTML = '<span style="font-size:11px;color:var(--muted)">loading…</span>';
+      try {
+        const res = await fetch('/api/custom-query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql: `DESCRIBE \`${table}\``, db: activeDatabase, target: 'source', limit: 200 }),
+        });
+        const data = await res.json();
+        const rows = data.source?.rows || [];
+        if (!rows.length) { box.innerHTML = '<span style="font-size:11px;color:var(--muted)">no columns found</span>'; return; }
+        scColumnsRows = rows;
+        scRenderColumns(rows);
+      } catch (e) {
+        box.innerHTML = `<span style="font-size:11px;color:var(--fail)">${e.message}</span>`;
+      }
+    }
+
+    function scRenderColumns(rows) {
+      const box = document.getElementById('sc-columns');
+      const table = scColumnsTable;
+      const scIgnores = (atConfig.ignore_fields && atConfig.ignore_fields.sql_compare) || {};
+      const ignored = (scIgnores[activeDatabase] && scIgnores[activeDatabase][table]) || [];
+      box.innerHTML = rows.map(r => {
+        const c = r[0], isPk = r[3] === 'PRI';
+        const isIgnored = !isPk && ignored.includes(c);
+        const style = isPk
+          ? 'cursor:pointer;font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--purple);background:rgba(188,140,255,0.12);color:var(--purple);white-space:nowrap;font-weight:600'
+          : `cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:${isIgnored ? 'var(--muted)' : 'var(--blue)'};white-space:nowrap;${isIgnored ? 'text-decoration:line-through;opacity:0.6' : ''}`;
+        const badge = isPk ? ' <span style="font-size:9px;opacity:0.7">PK</span>' : '';
+        const ignoreToggle = isPk ? '' :
+          ` <span onclick="event.stopPropagation(); scToggleIgnoreField('${c.replace(/'/g,"\\'")}\', ${!isIgnored})" title="${isIgnored ? 'unignore' : 'ignore in sql_compare'}" style="cursor:pointer;font-size:9px;opacity:0.7;margin-left:3px">${isIgnored ? '✓' : '⛔'}</span>`;
+        return `<span onclick="scInsertCol('${c.replace(/'/g,"\\'")}\')" title="${isPk ? 'Primary Key — ' : ''}คลิกเพื่อ insert" style="${style}">${c}${badge}${ignoreToggle}</span>`;
+      }).join('');
+    }
+
+    async function scToggleIgnoreField(column, ignore) {
+      const table = scColumnsTable;
+      if (!table) return;
+      try {
+        const resp = await fetch('/api/config/ignore-fields', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ db: activeDatabase, table, column, ignore, mode: 'sql_compare' }),
+        });
+        const result = await resp.json();
+        if (resp.ok && result.success) {
+          atConfig.ignore_fields = result.ignore_fields;
+          scRenderColumns(scColumnsRows);
+        } else {
+          alert('Failed to update ignore field settings: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert('Error: server unreachable');
+      }
+    }
+
+    function scInsertCol(col) {
+      const ta = document.getElementById('sc-sql');
+      const start = ta.selectionStart, end = ta.selectionEnd;
+      ta.value = ta.value.slice(0, start) + col + ta.value.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + col.length;
+      ta.focus();
+    }
+
+    function scOpen() {
+      document.getElementById('sc-overlay').classList.add('active');
+      document.getElementById('sc-drawer').classList.add('active');
+      scPopulateTables();
+      setTimeout(() => document.getElementById('sc-sql').focus(), 100);
+    }
+
+    function scClose() {
+      document.getElementById('sc-overlay').classList.remove('active');
+      document.getElementById('sc-drawer').classList.remove('active');
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        const d = document.getElementById('sc-drawer');
+        if (d && d.classList.contains('active')) scClose();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        const ta = document.getElementById('sc-sql');
+        if (document.activeElement === ta) { e.preventDefault(); scRun(); }
+      }
+    });
+
+    async function scRun() {
+      const sql   = (document.getElementById('sc-sql').value || '').trim();
+      const table = (document.getElementById('sc-table').value || '').trim();
+      const btn     = document.getElementById('sc-run-btn');
+      const stopBtn = document.getElementById('sc-stop-btn');
+      const status  = document.getElementById('sc-status');
+      const panel   = document.getElementById('sc-panel');
+
+      if (!sql) { status.textContent = 'SQL is empty.'; return; }
+      if (!table) { status.textContent = '⚠ กรุณาเลือก Table ก่อน Run Compare — ระบบใช้ PK จาก schema ของ table นี้ เพื่อไม่ให้ผลเพี้ยนจากการ compare'; return; }
+      if (_scEs) { _scEs.close(); _scEs = null; }
+
+      btn.disabled = true;
+      stopBtn.style.display = 'inline-flex';
+      document.getElementById('sc-btn-icon').textContent = '⌛';
+      document.getElementById('sc-btn-text').textContent = 'Running…';
+      status.textContent = '';
+      scState.mode = 'streaming';
+      scState.streamMeta = null;
+      scState.streamProg = null;
+
+      panel.innerHTML = `<div class="rc-empty" style="padding:48px 20px">
+        <div style="font-size:28px;margin-bottom:12px">⚡</div>
+        <div style="font-size:14px;color:var(--text)">เริ่ม streaming compare…</div>
+      </div>`;
+
+      const resetBtn = () => {
+        btn.disabled = false;
+        stopBtn.style.display = 'none';
+        document.getElementById('sc-btn-icon').textContent = '⚖';
+        document.getElementById('sc-btn-text').textContent = 'Run Compare';
+      };
+
+      try {
+        const res  = await fetch('/api/sql-compare/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql, table, db: activeDatabase }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          status.textContent = '❌ ' + data.error;
+          panel.innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">⚠</div><div style="color:var(--fail)">${sqlEsc(data.error)}</div></div>`;
+          resetBtn(); return;
+        }
+      } catch (err) {
+        status.textContent = '❌ ' + err.message;
+        resetBtn(); return;
+      }
+
+      _scEs = new EventSource('/api/sql-compare/stream');
+      _scEs.onmessage = e => {
+        let msg; try { msg = JSON.parse(e.data); } catch { return; }
+
+        if (msg.type === 'sc_start') {
+          scState.streamMeta = msg;
+          scState.streamProg = { total: 0, matches: 0, mismatches: 0, missing: 0, extra: 0 };
+          scRenderProgress();
+        } else if (msg.type === 'sc_progress') {
+          scState.streamProg = msg;
+          scRenderProgress();
+        } else if (msg.type === 'sc_done') {
+          scState.streamProg = msg;
+          scState.mode = 'done';
+          status.textContent = (msg.stopped ? '⏹ stopped — ' : '✓ done — ') +
+            `${(msg.total || 0).toLocaleString()} rows`;
+          scState.pagedFilter = 'discrepancy';
+          scState.pagedPage   = 0;
+          scState.expandedRows.clear();
+          scLoadPagedResults();
+        } else if (msg.type === 'error') {
+          status.textContent = '❌ ' + msg.message;
+          panel.innerHTML = `<div class="rc-empty"><div class="rc-empty-icon">⚠</div><div style="color:var(--fail)">${sqlEsc(msg.message)}</div></div>`;
+        } else if (msg.type === 'done') {
+          if (_scEs) { _scEs.close(); _scEs = null; }
+          resetBtn();
+        }
+      };
+      _scEs.onerror = () => {
+        if (_scEs) { _scEs.close(); _scEs = null; }
+        resetBtn();
+      };
+    }
+
+    async function scStop() {
+      if (_scEs) { _scEs.close(); _scEs = null; }
+      await fetch('/api/sql-compare/stop', { method: 'POST' });
+    }
+
+    function scRenderProgress() {
+      const prog = scState.streamProg || {};
+      const meta = scState.streamMeta || {};
+      const pkStr = (meta.pk_cols || []).join(', ');
+      document.getElementById('sc-panel').innerHTML = `
+        <div class="rc-summary-bar">
+          <div class="rc-stat"><span class="rc-stat-val total">${(prog.total||0).toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+          <div class="rc-stat"><span class="rc-stat-val pass">${(prog.matches||0).toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
+          <div class="rc-stat"><span class="rc-stat-val fail">${(prog.mismatches||0).toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
+          <div class="rc-stat"><span class="rc-stat-val warn">${(prog.missing||0).toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
+          <div class="rc-stat"><span class="rc-stat-val purple">${(prog.extra||0).toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
+          ${pkStr ? `<div style="margin-left:auto;font-size:11px;color:var(--muted)">PK: <strong style="color:var(--purple)">${pkStr}</strong></div>` : ''}
+        </div>
+        <div style="padding:32px 20px;text-align:center;color:var(--muted)">
+          <div style="font-size:22px;margin-bottom:8px">⚡</div>
+          <div style="font-size:13px">กำลัง stream &amp; compare…</div>
+          <div style="font-size:11px;margin-top:4px">ผลจะโหลดเมื่อเสร็จสิ้น</div>
+        </div>`;
+    }
+
+    async function scLoadPagedResults() {
+      const panel = document.getElementById('sc-panel');
+      panel.innerHTML = `<div class="rc-empty"><div style="font-size:22px;margin-bottom:8px">⏳</div><div>กำลังโหลดผลลัพธ์…</div></div>`;
+      try {
+        const res  = await fetch('/api/reports/full-compare/paged', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table: '_sql_compare', page: scState.pagedPage,
+            page_size: scState.pagedPageSize, filter_type: scState.pagedFilter }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          panel.innerHTML = `<div class="rc-empty"><div style="color:var(--fail)">${sqlEsc(data.error)}</div></div>`; return;
+        }
+        scState.pagedData = data;
+        scRenderPaged(data);
+      } catch (err) {
+        panel.innerHTML = `<div class="rc-empty"><div style="color:var(--fail)">${err.message}</div></div>`;
+      }
+    }
+
+    function scSetFilter(f) {
+      if (scState.mode !== 'done') return;
+      scState.pagedFilter = f;
+      scState.pagedPage   = 0;
+      scState.expandedRows.clear();
+      scLoadPagedResults();
+    }
+
+    function scGoPage(delta) {
+      if (scState.mode !== 'done' || !scState.pagedData) return;
+      const tp = scState.pagedData.total_pages || 1;
+      scState.pagedPage = Math.min(Math.max(scState.pagedPage + delta, 0), tp - 1);
+      scState.expandedRows.clear();
+      scLoadPagedResults();
+    }
+
+    function scToggleRow(idx) {
+      if (scState.expandedRows.has(idx)) scState.expandedRows.delete(idx);
+      else scState.expandedRows.add(idx);
+      const container = document.getElementById(`sc-fields-${idx}`);
+      const arrow     = document.getElementById(`sc-arrow-${idx}`);
+      if (container) container.classList.toggle('open');
+      if (arrow)     arrow.classList.toggle('open');
+    }
+
+    function scRenderPaged(data) {
+      const panel   = document.getElementById('sc-panel');
+      const tc      = data.type_counts || {};
+      const f       = scState.pagedFilter;
+      const samples = data.samples || [];
+      const total   = data.total || 0;
+      const totalPages = data.total_pages || 1;
+      const curPage    = data.page || 0;
+      const pageSize   = data.page_size || 50;
+      const pageStart  = curPage * pageSize;
+      const pageEnd    = pageStart + samples.length;
+      const meta    = scState.streamMeta || {};
+      const pkStr   = (meta.pk_cols || []).join(', ');
+      const tblName = meta.table || '';
+
+      // coverage = rows that exist on both sides / total
+      const allRows   = tc.all || 0;
+      const discTotal = (tc.mismatch||0) + (tc.missing||0) + (tc.extra||0);
+      const covPct    = allRows > 0 ? Math.round(((allRows - (tc.missing||0) - (tc.extra||0)) / allRows) * 100) : 100;
+
+      const summary = `
+        <div class="rc-summary-bar">
+          <div class="rc-stat"><span class="rc-stat-val total">${allRows.toLocaleString()}</span> <span style="color:var(--muted)">Compared</span></div>
+          <div class="rc-stat"><span class="rc-stat-val pass">${(tc.match||0).toLocaleString()}</span> <span style="color:var(--muted)">Match</span></div>
+          <div class="rc-stat"><span class="rc-stat-val fail">${(tc.mismatch||0).toLocaleString()}</span> <span style="color:var(--muted)">Mismatch</span></div>
+          <div class="rc-stat"><span class="rc-stat-val warn">${(tc.missing||0).toLocaleString()}</span> <span style="color:var(--muted)">Missing</span></div>
+          <div class="rc-stat"><span class="rc-stat-val purple">${(tc.extra||0).toLocaleString()}</span> <span style="color:var(--muted)">Extra</span></div>
+          <div style="margin-left:auto;font-size:11px;color:var(--muted)">${tblName ? `Table: <strong style="color:var(--blue)">${tblName}</strong> &nbsp;` : ''}${pkStr ? `PK: <strong style="color:var(--purple)">${pkStr}</strong>` : ''}</div>
+        </div>`;
+
+      const explorerHeader = `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px 6px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+            <span style="font-size:13px;font-weight:600;color:var(--text)">📋 รายงานข้อผิดพลาดทั้งหมด</span>
+            <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;background:${covPct===100?'rgba(80,200,120,0.15)':'rgba(227,179,65,0.15)'};color:${covPct===100?'var(--pass)':'var(--warn)'};border:1px solid ${covPct===100?'var(--pass)':'var(--warn)'}">${covPct}% COVERAGE</span>
+            <span style="font-size:11px;color:var(--muted)">รวม ${discTotal.toLocaleString()} รายการ (mismatch ${(tc.mismatch||0).toLocaleString()} / missing ${(tc.missing||0).toLocaleString()} / extra ${(tc.extra||0).toLocaleString()})</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <a href="/api/reports/download-excel/${SC_REPORT}" target="_blank"
+               style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;text-decoration:none;background:rgba(34,197,94,0.12);border:1px solid var(--pass);color:var(--pass)">
+              📊 Excel (.xlsx)
+            </a>
+            <a href="/api/reports/download-csv/${SC_REPORT}" target="_blank"
+               style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;text-decoration:none;background:var(--surface2);border:1px solid var(--border);color:var(--text)">
+              📄 CSV (raw)
+            </a>
+          </div>
+        </div>`;
+
+      const discCount = (f === 'discrepancy') ? discTotal : (f === 'all' ? allRows : (tc[f] || 0));
+      const filterBar = `
+        <div class="rc-filter-bar">
+          <button class="rc-filter-btn ${f==='discrepancy'?'active':''}" onclick="scSetFilter('discrepancy')">ALL (${discTotal.toLocaleString()})</button>
+          <button class="rc-filter-btn ${f==='mismatch'?'active':''}" onclick="scSetFilter('mismatch')">MISMATCH (${(tc.mismatch||0).toLocaleString()})</button>
+          <button class="rc-filter-btn ${f==='missing'?'active':''}" onclick="scSetFilter('missing')">MISSING (${(tc.missing||0).toLocaleString()})</button>
+          <button class="rc-filter-btn ${f==='extra'?'active':''}" onclick="scSetFilter('extra')">EXTRA (${(tc.extra||0).toLocaleString()})</button>
+          <span style="margin-left:auto;font-size:11px;color:var(--muted)">แสดง ${pageStart+1}–${pageEnd} จาก ${total.toLocaleString()} แถว</span>
+        </div>`;
+
+      let bodyHtml = '';
+      if (!samples.length) {
+        bodyHtml = `<div class="rc-empty"><div class="rc-empty-icon">✅</div><div>ไม่มีข้อมูลในหมวดหมู่นี้</div></div>`;
+      } else {
+        bodyHtml = samples.map((row, pi) => {
+          const rowType    = row.type || 'match';
+          const isExpanded = scState.expandedRows.has(pi);
+          const pkStrRow   = Object.entries(row.pk || {}).map(([k, v]) => `<span style="color:var(--muted)">${k}:</span> ${v}`).join(', ');
+          const diffCount  = (row.fields || []).filter(fld => !fld.match).length;
+          const badgeLabel = rowType === 'match'  ? '✓ MATCH'   :
+                             rowType === 'missing' ? '⚠ MISSING' :
+                             rowType === 'extra'   ? '➕ EXTRA'   : `✗ ${diffCount} DIFF`;
+
+          let fieldsHtml = '';
+          if (row.fields && row.fields.length > 0) {
+            fieldsHtml = `
+              <div class="rc-fields-container ${isExpanded ? 'open' : ''}" id="sc-fields-${pi}">
+                <table class="rc-fields-table">
+                  <thead><tr>
+                    <th style="width:30px">✓</th><th>Column</th>
+                    <th>Source</th><th>Target</th>
+                  </tr></thead>
+                  <tbody>
+                    ${row.fields.map(fld => {
+                      const cls  = fld.match ? '' : 'field-diff';
+                      const icon = fld.match ? '<span class="field-match-icon ok">✓</span>' : '<span class="field-match-icon diff">✗</span>';
+                      const sv   = fld.source != null ? sqlEsc(String(fld.source)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+                      const tv   = fld.target != null ? sqlEsc(String(fld.target)) : '<span style="color:var(--muted);font-style:italic">NULL</span>';
+                      return `<tr class="${cls}"><td>${icon}</td><td class="field-col-name">${fld.column}</td><td class="field-src">${sv}</td><td class="field-tgt">${tv}</td></tr>`;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>`;
+          }
+
+          return `
+            <div class="rc-row-card ${rowType}">
+              <div class="rc-row-header" onclick="scToggleRow(${pi})">
+                <span class="rc-row-num">#${pageStart + pi + 1}</span>
+                <span class="rc-row-pk">${pkStrRow}</span>
+                <span class="rc-row-badge ${rowType}">${badgeLabel}</span>
+                <span class="rc-row-expand ${isExpanded ? 'open' : ''}" id="sc-arrow-${pi}">▶</span>
+              </div>
+              ${fieldsHtml}
+            </div>`;
+        }).join('');
+      }
+
+      const pagination = `
+        <div class="rc-pagination">
+          <button class="rc-page-btn" onclick="scGoPage(-1)" ${curPage <= 0 ? 'disabled' : ''}>◀ Prev</button>
+          <span class="rc-page-info">Page ${curPage + 1} / ${totalPages}</span>
+          <button class="rc-page-btn" onclick="scGoPage(1)" ${curPage >= totalPages - 1 ? 'disabled' : ''}>Next ▶</button>
+        </div>`;
+
+      panel.innerHTML = summary + explorerHeader + filterBar + `<div class="rc-body">${bodyHtml}</div>` + pagination;
+    }
+
+    function rcBuildPanelHtml(tableName) {
+      return `
+    <div class="rc-panel" id="rc-panel">
+      <div class="rc-panel-header">
+        <div class="rc-panel-title">🎲 Random Field-by-Field Comparison</div>
+        <div class="rc-controls">
+          <div class="rc-batch-nav">
+            <button class="rc-batch-btn rc-batch-prev" onclick="rcGoBatch(-1)" disabled>◀</button>
+            <span class="rc-batch-info" style="min-width:80px; text-align:center;">—</span>
+            <button class="rc-batch-btn rc-batch-next" onclick="rcGoBatch(1)" disabled>▶</button>
+          </div>
+          <button class="rc-btn" id="rc-sample-btn" onclick="rcRunRandomCompare('${tableName}')"
+            ${document.getElementById('at-run-btn')?.disabled ? 'disabled title="Validation is running — wait before sampling"' : ''}>
+            <span class="rc-spinner"></span>
+            <span class="rc-btn-icon">🔀</span>
+            สุ่ม 1,000 แถว
+          </button>
+        </div>
+      </div>
+      <div class="rc-body">
+        <div class="rc-empty">
+          <div class="rc-empty-icon">🎲</div>
+          <div>กดปุ่ม <strong>"🔀 สุ่ม 1,000 แถว"</strong> เพื่อสุ่มเปรียบเทียบข้อมูล</div>
+          <div style="margin-top:4px; font-size:11px;">จะสุ่มเอาแถวจาก Source มาเทียบกับ Target ทีละ field</div>
+        </div>
+      </div>
+    </div>`;
+    }
+  </script>
+</body>
+
+</html>

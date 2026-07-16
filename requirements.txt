@@ -1,0 +1,4 @@
+flask>=3.0
+xlsxwriter>=3.0
+openpyxl>=3.0
+mysqlclient>=2.0

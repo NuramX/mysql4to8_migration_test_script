@@ -48,3 +48,10 @@ Thumbs.db
 *.mov
 *.wmv
 
+__pycache__/
+*.pyc
+*.log
+config.json
+static/reports/
+.venv/
+Timestamp Range & Row Count_condition.*
